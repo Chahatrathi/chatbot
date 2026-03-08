@@ -6,7 +6,6 @@ from PyPDF2 import PdfReader
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-# Load local .env file if it exists (for VS Code development)
 load_dotenv()
 
 class DatabaseManager:
@@ -35,19 +34,17 @@ class DatabaseManager:
 
 class ChatBackend:
     def __init__(self):
-        # 1. Try Streamlit Secrets (Production) 2. Try .env (Local)
         api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
         
         if not api_key:
-            st.error("API Key not found! Check your Secrets or .env file.")
+            st.error("API Key not found!")
             st.stop()
         
-        # KEY FIX: Setting safety_settings to BLOCK_NONE to prevent ClientError on sensitive topics
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash", 
             google_api_key=api_key,
             streaming=True,
-            temperature=0,
+            temperature=0.2, # Slightly higher for better summaries
             model_kwargs={"api_version": "v1"},
             safety_settings={
                 "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
@@ -72,24 +69,34 @@ class ChatBackend:
                     reader = PdfReader(file_path)
                     for page in reader.pages:
                         text = page.extract_text()
-                        if text: combined_text += text + "\n"
+                        if text: combined_text += text + " "
                 elif filename.endswith(".txt"):
                     with open(file_path, "r", encoding="utf-8") as f:
-                        combined_text += f.read() + "\n"
+                        combined_text += f.read() + " "
             except Exception as e:
                 st.error(f"Error reading {filename}: {e}")
         
-        return combined_text[:25000]
+        # CLEANING: Remove excess whitespace to save tokens
+        cleaned_text = " ".join(combined_text.split())
+        
+        # LIMIT: Lowering to 15,000 characters to ensure the 'Summary' has room to generate
+        return cleaned_text[:15000]
 
     def get_streaming_response(self, user_input):
         raw_history = self.db.get_all_history()
+        
+        # Concise System Instruction
         sys_prompt = (
-            "You are a professional assistant. Answer based on the documents. "
-            "If the info isn't there, say so.\n\n"
-            f"INTERNAL DOCUMENTS:\n{self.knowledge_base}"
+            "You are a helpful assistant. Use the provided context to answer. "
+            "If the info isn't there, use general knowledge but say so.\n\n"
+            f"CONTEXT: {self.knowledge_base}"
         )
+        
         messages = [SystemMessage(content=sys_prompt)]
-        for role, content in raw_history[-5:]:
+        
+        # Only last 3 messages for history to keep the prompt light
+        for role, content in raw_history[-3:]:
             messages.append(HumanMessage(content=content) if role == "user" else AIMessage(content=content))
+        
         messages.append(HumanMessage(content=user_input))
         return self.llm.stream(messages)
