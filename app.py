@@ -1,35 +1,35 @@
 import streamlit as st
 from backend import ChatBackend
 
-st.set_page_config(page_title="Instant AI", layout="wide")
+st.set_page_config(page_title="Internal Knowledge Bot", layout="wide")
 
-# Initialize Backend once and cache it for speed
+# Cache the backend to ensure documents are only read once (improves speed)
 @st.cache_resource
 def get_backend():
     return ChatBackend()
 
 backend = get_backend()
 
-st.title("⚡ Instant Memory Chatbot")
+st.title("🛡️ Internal Knowledge Chatbot")
+st.info("This bot is powered by internal backend documents.")
 
-# Sidebar for immediate access to data
+# Sidebar for history management
 with st.sidebar:
-    st.header("Data Archive")
-    chat_log = backend.db.get_chat_as_text()
-    st.download_button("📥 Download All Chats", chat_log, "chat_history.txt", use_container_width=True)
-    
-    if st.button("🗑️ Clear Database", use_container_width=True):
+    if st.button("🗑️ Reset Chat"):
         backend.db.conn.execute("DELETE FROM messages")
         backend.db.conn.commit()
         st.rerun()
+    
+    chat_log = "\n".join([f"{r}: {c}" for r, c in backend.db.get_all_history()])
+    st.download_button("📥 Export Logs", chat_log, "logs.txt")
 
-# Display History immediately on load
+# Display Conversation
 for role, content in backend.db.get_all_history():
     with st.chat_message(role):
         st.markdown(content)
 
-# Instant Input
-if prompt := st.chat_input("How can I help you right now?"):
+# Interaction
+if prompt := st.chat_input("Ask a question about the internal documents..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
@@ -37,7 +37,6 @@ if prompt := st.chat_input("How can I help you right now?"):
         response_generator = backend.get_streaming_response(prompt)
         full_response = st.write_stream(response_generator)
         
-    # Persistent saving in the background
     backend.db.save_message("user", prompt)
     backend.db.save_message("assistant", full_response)
     st.rerun()
