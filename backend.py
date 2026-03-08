@@ -32,20 +32,23 @@ class DatabaseManager:
 
 class ChatBackend:
     def __init__(self, api_key):
-        # We initialize with the key provided via the chat prompt
-        self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key)
+        # streaming=True is key for perceived speed
+        self.llm = ChatGoogleGenerativeAI(
+            model="gemini-1.5-flash", 
+            google_api_key=api_key,
+            streaming=True 
+        )
         self.db = DatabaseManager()
 
-    def get_response(self, user_input):
+    def get_streaming_response(self, user_input):
         raw_history = self.db.get_all_history()
         messages = [SystemMessage(content="You are a helpful assistant.")]
+        
         for role, content in raw_history:
             msg_type = HumanMessage(content=content) if role == "user" else AIMessage(content=content)
             messages.append(msg_type)
         
         messages.append(HumanMessage(content=user_input))
-        response = self.llm.invoke(messages)
         
-        self.db.save_message("user", user_input)
-        self.db.save_message("assistant", response.content)
-        return response.content
+        # This returns a stream instead of a static string
+        return self.llm.stream(messages)
