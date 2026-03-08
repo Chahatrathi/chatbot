@@ -6,6 +6,7 @@ from PyPDF2 import PdfReader
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
+# Load local .env file if it exists (for VS Code development)
 load_dotenv()
 
 class DatabaseManager:
@@ -34,25 +35,26 @@ class DatabaseManager:
 
 class ChatBackend:
     def __init__(self):
+        # 1. Try Streamlit Secrets (Production) 2. Try .env (Local)
         api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        
         if not api_key:
-            st.error("API Key not found!")
+            st.error("API Key not found! Check your Secrets or .env file.")
             st.stop()
         
-        # Updated Initialization
+        # KEY FIX: Explicitly forcing 'v1' through model_kwargs and using base name
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash", 
             google_api_key=api_key,
             streaming=True,
             temperature=0.1,
-            model_kwargs={"api_version": "v1"},
-            # BLOCK_NONE across all categories to prevent the 'Redacted' ClientError
+            # This forces the stable production endpoint
+            model_kwargs={"api_version": "v1"}, 
             safety_settings={
                 "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
                 "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
                 "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
                 "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
-                "HARM_CATEGORY_CIVIC_INTEGRITY": "BLOCK_NONE" # Added for 2026 standards
             }
         )
         self.db = DatabaseManager()
@@ -78,23 +80,20 @@ class ChatBackend:
             except Exception as e:
                 st.error(f"Error reading {filename}: {e}")
         
-        return " ".join(combined_text.split())[:12000] # Clean and cap for safety
+        return " ".join(combined_text.split())[:15000]
 
     def get_streaming_response(self, user_input):
         raw_history = self.db.get_all_history()
         
-        # Strategy: Put the documents in a 'context' block within the Human message
-        # rather than the System prompt. This is much less likely to trigger safety blocks.
-        context_block = f"INTERNAL DOCUMENT CONTEXT: {self.knowledge_base}\n\n"
+        # We use a User message for context to avoid system-level safety blocks
+        context_block = f"VERIFIED CONTEXT: {self.knowledge_base}\n\n"
         
         messages = [
-            SystemMessage(content="You are a neutral information assistant. Answer using the provided context.")
+            SystemMessage(content="You are a helpful AI. Use the provided context to answer.")
         ]
         
-        for role, content in raw_history[-3:]:
+        for role, content in raw_history[-5:]:
             messages.append(HumanMessage(content=content) if role == "user" else AIMessage(content=content))
         
-        # Inject context into the final user prompt
-        messages.append(HumanMessage(content=f"{context_block}USER QUESTION: {user_input}"))
-        
+        messages.append(HumanMessage(content=f"{context_block}QUESTION: {user_input}"))
         return self.llm.stream(messages)
