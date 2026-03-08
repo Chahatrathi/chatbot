@@ -1,6 +1,6 @@
 import sqlite3
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.schema import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 class DatabaseManager:
     def __init__(self, db_path="chat_history.db"):
@@ -29,11 +29,12 @@ class DatabaseManager:
 
     def get_chat_as_text(self):
         history = self.get_all_history()
-        # Format the history into a clean string for the download file
-        text_output = "--- CHAT HISTORY LOG ---\n\n"
+        if not history:
+            return "No chat history found."
+        text_output = "--- CHAT HISTORY ARCHIVE ---\n\n"
         for role, content in history:
             text_output += f"[{role.upper()}]: {content}\n"
-            text_output += "-" * 20 + "\n"
+            text_output += "-" * 30 + "\n"
         return text_output
 
 class ChatBackend:
@@ -44,18 +45,13 @@ class ChatBackend:
     def get_response(self, user_input):
         raw_history = self.db.get_all_history()
         messages = [SystemMessage(content="You are a helpful assistant.")]
-        
         for role, content in raw_history:
             if role == "user":
                 messages.append(HumanMessage(content=content))
             else:
                 messages.append(AIMessage(content=content))
-        
         messages.append(HumanMessage(content=user_input))
         response = self.llm.invoke(messages)
-        
-        # Save both to the backend DB
         self.db.save_message("user", user_input)
         self.db.save_message("assistant", response.content)
-        
         return response.content
