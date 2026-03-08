@@ -33,10 +33,10 @@ class DatabaseManager:
 
 class ChatBackend:
     def __init__(self):
-        # Automatically pull key from Streamlit Secrets
+        # Pull key from Streamlit Secrets
         api_key = st.secrets["GOOGLE_API_KEY"]
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash", 
+            model="gemini-1.5-flash", # Remove 'models/' prefix
             google_api_key=api_key,
             streaming=True
         )
