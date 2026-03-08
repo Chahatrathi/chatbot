@@ -35,15 +35,14 @@ class DatabaseManager:
 
 class ChatBackend:
     def __init__(self):
-        # 1. Try to get key from Streamlit Secrets (Production)
-        # 2. If not found, try to get key from .env file (Local VS Code)
+        # 1. Try Streamlit Secrets (Production) 2. Try .env (Local)
         api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
         
         if not api_key:
-            st.error("API Key not found! Please set GOOGLE_API_KEY in Secrets or .env file.")
+            st.error("API Key not found! Check your Secrets or .env file.")
             st.stop()
         
-        # Initialize Gemini with the stable v1 endpoint to prevent 404 errors
+        # KEY FIX: Setting safety_settings to BLOCK_NONE to prevent ClientError on sensitive topics
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash", 
             google_api_key=api_key,
@@ -61,7 +60,6 @@ class ChatBackend:
         self.knowledge_base = self._load_backend_documents("documents")
 
     def _load_backend_documents(self, folder_path):
-        """Automatically reads all PDFs and TXTs in the backend documents folder."""
         combined_text = ""
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
@@ -81,23 +79,17 @@ class ChatBackend:
             except Exception as e:
                 st.error(f"Error reading {filename}: {e}")
         
-        return combined_text[:25000] # Stay within token safety limits
+        return combined_text[:25000]
 
     def get_streaming_response(self, user_input):
         raw_history = self.db.get_all_history()
-        
         sys_prompt = (
-            "You are a professional assistant. Answer the user based on the "
-            "provided documents. If the information isn't there, rely on your "
-            "general knowledge but clarify that it wasn't in the docs.\n\n"
+            "You are a professional assistant. Answer based on the documents. "
+            "If the info isn't there, say so.\n\n"
             f"INTERNAL DOCUMENTS:\n{self.knowledge_base}"
         )
-        
         messages = [SystemMessage(content=sys_prompt)]
-        
-        # Include last 5 messages for conversation memory
         for role, content in raw_history[-5:]:
             messages.append(HumanMessage(content=content) if role == "user" else AIMessage(content=content))
-        
         messages.append(HumanMessage(content=user_input))
         return self.llm.stream(messages)
