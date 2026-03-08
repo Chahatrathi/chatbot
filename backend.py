@@ -1,4 +1,5 @@
 import sqlite3
+import streamlit as st
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
@@ -31,12 +32,13 @@ class DatabaseManager:
         return "\n".join([f"[{r.upper()}]: {c}\n{'-'*20}" for r, c in history]) if history else "No history."
 
 class ChatBackend:
-    def __init__(self, api_key):
-        # streaming=True is key for perceived speed
+    def __init__(self):
+        # Automatically pull key from Streamlit Secrets
+        api_key = st.secrets["GOOGLE_API_KEY"]
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash", 
             google_api_key=api_key,
-            streaming=True 
+            streaming=True
         )
         self.db = DatabaseManager()
 
@@ -49,6 +51,4 @@ class ChatBackend:
             messages.append(msg_type)
         
         messages.append(HumanMessage(content=user_input))
-        
-        # This returns a stream instead of a static string
         return self.llm.stream(messages)
