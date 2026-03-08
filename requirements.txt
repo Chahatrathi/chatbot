@@ -5,3 +5,4 @@ langchain-google-genai
 langchain-core
 google-generativeai
 PyPDF2
+python-dotenv
