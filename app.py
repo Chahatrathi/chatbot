@@ -1,59 +1,43 @@
 import streamlit as st
 from backend import ChatBackend
 
-st.set_page_config(page_title="Fast Gemini", layout="wide")
+st.set_page_config(page_title="Instant AI", layout="wide")
 
-# Persistent storage for the backend instance
-if "backend" not in st.session_state:
-    st.session_state.backend = None
-if "setup_finished" not in st.session_state:
-    st.session_state.setup_finished = False
+# Initialize Backend once and cache it for speed
+@st.cache_resource
+def get_backend():
+    return ChatBackend()
 
-st.title("⚡ High-Speed Gemini Chat")
+backend = get_backend()
 
-# Sidebar
-if st.session_state.setup_finished:
-    with st.sidebar:
-        st.header("Options")
-        chat_log = st.session_state.backend.db.get_chat_as_text()
-        st.download_button("📥 Export History", chat_log, "chat.txt", use_container_width=True)
-        if st.button("🔄 Reset Session", use_container_width=True):
-            st.session_state.setup_finished = False
-            st.rerun()
+st.title("⚡ Instant Memory Chatbot")
 
-# --- CHAT INTERFACE ---
-
-if not st.session_state.setup_finished:
-    with st.chat_message("assistant"):
-        st.write("Please provide your API key to begin.")
+# Sidebar for immediate access to data
+with st.sidebar:
+    st.header("Data Archive")
+    chat_log = backend.db.get_chat_as_text()
+    st.download_button("📥 Download All Chats", chat_log, "chat_history.txt", use_container_width=True)
     
-    if key_input := st.chat_input("Enter Key..."):
-        if key_input.startswith("AIza"):
-            st.session_state.backend = ChatBackend(key_input)
-            st.session_state.setup_finished = True
-            st.rerun()
-        else:
-            st.error("Invalid Key Format.")
-
-else:
-    # Display History
-    for role, content in st.session_state.backend.db.get_all_history():
-        with st.chat_message(role):
-            st.markdown(content)
-
-    # Handle Input with Streaming
-    if prompt := st.chat_input("Type your message..."):
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        with st.chat_message("assistant"):
-            # Stream the response chunk by chunk
-            response_generator = st.session_state.backend.get_streaming_response(prompt)
-            full_response = st.write_stream(response_generator)
-            
-        # Save to DB only AFTER the stream finishes
-        st.session_state.backend.db.save_message("user", prompt)
-        st.session_state.backend.db.save_message("assistant", full_response)
-        
-        # Minimal rerun to update sidebar download data
+    if st.button("🗑️ Clear Database", use_container_width=True):
+        backend.db.conn.execute("DELETE FROM messages")
+        backend.db.conn.commit()
         st.rerun()
+
+# Display History immediately on load
+for role, content in backend.db.get_all_history():
+    with st.chat_message(role):
+        st.markdown(content)
+
+# Instant Input
+if prompt := st.chat_input("How can I help you right now?"):
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        response_generator = backend.get_streaming_response(prompt)
+        full_response = st.write_stream(response_generator)
+        
+    # Persistent saving in the background
+    backend.db.save_message("user", prompt)
+    backend.db.save_message("assistant", full_response)
+    st.rerun()
