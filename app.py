@@ -1,55 +1,58 @@
 import streamlit as st
 from backend import ChatBackend
 
-st.set_page_config(page_title="Chat Archive", page_icon="💾")
+st.set_page_config(page_title="AI Vault", layout="wide")
 
-st.title("💾 Chatbot with Persistent Memory")
+# Initialize State
+if "api_key" not in st.session_state:
+    st.session_state.api_key = None
+if "setup_finished" not in st.session_state:
+    st.session_state.setup_finished = False
 
-# Sidebar
-with st.sidebar:
-    st.header("Settings")
-    api_key = st.text_input("Google API Key", type="password")
-    
-    st.divider()
-    
-    # Download Logic
-    if "backend" in st.session_state:
-        st.subheader("Archive")
-        chat_text = st.session_state.backend.db.get_chat_as_text()
-        
-        st.download_button(
-            label="📥 Download Chats (.txt)",
-            data=chat_text,
-            file_name="chat_history.txt",
-            mime="text/plain"
-        )
-        
-        if st.button("🗑️ Clear History"):
-            # Optional: Add logic here to clear the DB if you want
-            st.warning("Feature not yet implemented: Requires SQL Delete")
+st.title("💬 Secure Memory Chatbot")
 
-if api_key:
-    if "backend" not in st.session_state:
-        st.session_state.backend = ChatBackend(api_key)
+# Sidebar for the Download Button
+if st.session_state.setup_finished:
+    with st.sidebar:
+        st.header("Archive")
+        chat_data = st.session_state.backend.db.get_chat_as_text()
+        st.download_button("📥 Download Conversations", chat_data, "history.txt")
+
+# --- CHAT LOGIC ---
+
+# Step 1: Request API Key via Chat
+if not st.session_state.setup_finished:
+    with st.chat_message("assistant"):
+        st.markdown("Hello! To get started, please paste your **Google API Key** below. (I won't save it outside this session).")
     
-    # Load and display persistent history from backend
-    history = st.session_state.backend.db.get_all_history()
-    for role, content in history:
+    if key_input := st.chat_input("Paste your API key here..."):
+        # Simple validation: Gemini keys usually start with 'AIza'
+        if key_input.startswith("AIza") and len(key_input) > 20:
+            st.session_state.api_key = key_input
+            st.session_state.backend = ChatBackend(key_input)
+            st.session_state.setup_finished = True
+            st.success("API Key accepted!")
+            st.rerun()
+        else:
+            st.error("That doesn't look like a valid Google API key. Please try again.")
+
+# Step 2: Normal Chat Mode
+else:
+    # Display historical chats from the DB
+    for role, content in st.session_state.backend.db.get_all_history():
         with st.chat_message(role):
             st.markdown(content)
 
-    # Chat Input
-    if prompt := st.chat_input("Ask me anything..."):
+    # Process new input
+    if prompt := st.chat_input("How can I help you today?"):
         with st.chat_message("user"):
             st.markdown(prompt)
-
-        with st.spinner("Processing..."):
-            response = st.session_state.backend.get_response(prompt)
-            
-        with st.chat_message("assistant"):
-            st.markdown(response)
         
-        # Rerurn to update the download button data immediately
-        st.rerun()
-else:
-    st.info("Enter your API key in the sidebar to load your history and start chatting.")
+        with st.spinner("Thinking..."):
+            try:
+                answer = st.session_state.backend.get_response(prompt)
+                with st.chat_message("assistant"):
+                    st.markdown(answer)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}. Your API key might be invalid or expired.")
