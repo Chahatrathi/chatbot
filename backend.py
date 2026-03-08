@@ -35,22 +35,24 @@ class DatabaseManager:
 class ChatBackend:
     def __init__(self):
         api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        
         if not api_key:
             st.error("API Key not found!")
             st.stop()
         
+        # Updated Initialization
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash", 
             google_api_key=api_key,
             streaming=True,
-            temperature=0.2, # Slightly higher for better summaries
+            temperature=0.1,
             model_kwargs={"api_version": "v1"},
+            # BLOCK_NONE across all categories to prevent the 'Redacted' ClientError
             safety_settings={
                 "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
                 "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
                 "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
                 "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+                "HARM_CATEGORY_CIVIC_INTEGRITY": "BLOCK_NONE" # Added for 2026 standards
             }
         )
         self.db = DatabaseManager()
@@ -76,27 +78,23 @@ class ChatBackend:
             except Exception as e:
                 st.error(f"Error reading {filename}: {e}")
         
-        # CLEANING: Remove excess whitespace to save tokens
-        cleaned_text = " ".join(combined_text.split())
-        
-        # LIMIT: Lowering to 15,000 characters to ensure the 'Summary' has room to generate
-        return cleaned_text[:15000]
+        return " ".join(combined_text.split())[:12000] # Clean and cap for safety
 
     def get_streaming_response(self, user_input):
         raw_history = self.db.get_all_history()
         
-        # Concise System Instruction
-        sys_prompt = (
-            "You are a helpful assistant. Use the provided context to answer. "
-            "If the info isn't there, use general knowledge but say so.\n\n"
-            f"CONTEXT: {self.knowledge_base}"
-        )
+        # Strategy: Put the documents in a 'context' block within the Human message
+        # rather than the System prompt. This is much less likely to trigger safety blocks.
+        context_block = f"INTERNAL DOCUMENT CONTEXT: {self.knowledge_base}\n\n"
         
-        messages = [SystemMessage(content=sys_prompt)]
+        messages = [
+            SystemMessage(content="You are a neutral information assistant. Answer using the provided context.")
+        ]
         
-        # Only last 3 messages for history to keep the prompt light
         for role, content in raw_history[-3:]:
             messages.append(HumanMessage(content=content) if role == "user" else AIMessage(content=content))
         
-        messages.append(HumanMessage(content=user_input))
+        # Inject context into the final user prompt
+        messages.append(HumanMessage(content=f"{context_block}USER QUESTION: {user_input}"))
+        
         return self.llm.stream(messages)
