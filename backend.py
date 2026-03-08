@@ -27,29 +27,34 @@ class DatabaseManager:
         cursor = self.conn.execute("SELECT role, content FROM messages ORDER BY timestamp ASC")
         return cursor.fetchall()
 
+    def get_chat_as_text(self):
+        history = self.get_all_history()
+        # Format the history into a clean string for the download file
+        text_output = "--- CHAT HISTORY LOG ---\n\n"
+        for role, content in history:
+            text_output += f"[{role.upper()}]: {content}\n"
+            text_output += "-" * 20 + "\n"
+        return text_output
+
 class ChatBackend:
     def __init__(self, api_key):
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key)
         self.db = DatabaseManager()
 
     def get_response(self, user_input):
-        # 1. Fetch ALL previous data from the backend database
         raw_history = self.db.get_all_history()
+        messages = [SystemMessage(content="You are a helpful assistant.")]
         
-        # 2. Format history for the AI
-        messages = [SystemMessage(content="You are a helpful assistant who remembers everything we talked about.")]
         for role, content in raw_history:
             if role == "user":
                 messages.append(HumanMessage(content=content))
             else:
                 messages.append(AIMessage(content=content))
         
-        # 3. Add current input
         messages.append(HumanMessage(content=user_input))
-        
-        # 4. Get AI response and save both to DB
         response = self.llm.invoke(messages)
         
+        # Save both to the backend DB
         self.db.save_message("user", user_input)
         self.db.save_message("assistant", response.content)
         
