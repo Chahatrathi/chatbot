@@ -1,15 +1,16 @@
 import streamlit as st
 import os
-import google.generativeai as genai
+from google import genai
 from pypdf import PdfReader
 import docx
 
 # --- 1. INITIAL CONFIGURATION ---
-# Use Streamlit Secrets for your key: GOOGLE_API_KEY
+# Initialize the client with your API key from Streamlit Secrets
 if "GOOGLE_API_KEY" in st.secrets:
-    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+    client = genai.Client(api_key=st.secrets["GOOGLE_API_KEY"])
 else:
     st.error("Please add GOOGLE_API_KEY to your Streamlit Secrets.")
+    st.stop()
 
 # --- 2. FILE EXTRACTION UTILITY ---
 def extract_text(uploaded_files):
@@ -51,7 +52,7 @@ with st.sidebar:
     uploaded_files = st.file_uploader("Upload Files", type=["pdf", "docx", "txt"], accept_multiple_files=True)
 
 # --- 5. CHAT LOGIC ---
-# Display messages directly (No download buttons)
+# Display messages directly
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -64,13 +65,15 @@ if prompt := st.chat_input("Ask a question..."):
     with st.chat_message("assistant"):
         doc_text = extract_text(uploaded_files) if uploaded_files else "No documents uploaded."
         
-        # Fixed Model Prompt
-        full_prompt = f"Context: {doc_text[:15000]}\n\nQuestion: {prompt}\n\nAnswer concisely based on the context."
+        # Build prompt using the new SDK format
+        full_content = f"Context: {doc_text[:20000]}\n\nQuestion: {prompt}\n\nAnswer concise and direct."
 
         try:
-            # FIX: Try 'gemini-1.5-flash' without the 'models/' prefix for v1beta compatibility
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            response = model.generate_content(full_prompt)
+            # New SDK call: client.models.generate_content
+            response = client.models.generate_content(
+                model="gemini-1.5-flash", 
+                contents=full_content
+            )
             answer = response.text
             
             st.markdown(answer)
