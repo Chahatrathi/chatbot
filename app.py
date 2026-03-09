@@ -4,6 +4,8 @@ from google import genai
 from pypdf import PdfReader
 import docx
 import uuid
+import time
+from google.genai.errors import ClientError
 
 # --- 1. INITIAL CONFIGURATION ---
 if "GOOGLE_API_KEY" in st.secrets:
@@ -15,7 +17,7 @@ else:
     st.error("Please add GOOGLE_API_KEY to your Streamlit Secrets.")
     st.stop()
 
-# --- 2. SESSION MANAGEMENT (History) ---
+# --- 2. SESSION MANAGEMENT ---
 if "all_chats" not in st.session_state:
     initial_id = str(uuid.uuid4())
     st.session_state.all_chats = {
@@ -65,23 +67,19 @@ with st.sidebar:
         index=chat_ids.index(st.session_state.current_chat_id)
     )
     st.session_state.current_chat_id = selected_chat
-    
     st.divider()
-    uploaded_files = st.file_uploader("Upload Knowledge Base", type=["pdf", "docx", "txt"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Upload Files", type=["pdf", "docx", "txt"], accept_multiple_files=True)
 
-# --- 5. CHAT INTERFACE ---
+# --- 5. CHAT LOGIC ---
 active_chat = st.session_state.all_chats[st.session_state.current_chat_id]
 
-# Display history
 for msg in active_chat["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# User Input
-if prompt := st.chat_input("Ask anything..."):
-    # Name the chat if it's the first message
+if prompt := st.chat_input("Ask a question..."):
     if not active_chat["messages"]:
-        active_chat["name"] = prompt[:25] + "..."
+        active_chat["name"] = prompt[:30] + "..."
 
     active_chat["messages"].append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -89,28 +87,30 @@ if prompt := st.chat_input("Ask anything..."):
 
     with st.chat_message("assistant"):
         doc_text = extract_text(uploaded_files) if uploaded_files else ""
-        
-        # UPDATED PROMPT: Priority to docs, fallback to general knowledge
-        full_prompt = f"""
-        You are a helpful research assistant.
-        CONTEXT FROM UPLOADED DOCUMENTS: {doc_text[:30000]}
-        
-        USER QUESTION: {prompt}
-        
-        INSTRUCTIONS:
-        1. If the answer is in the documents, prioritize that information.
-        2. If the answer is NOT in the documents, provide a factual answer using your general knowledge. 
-        3. Do not refuse to answer general questions like "What is equity?" or "What are mutual funds?".
-        4. Be direct, clear, and concise.
-        """
+        full_prompt = f"Context: {doc_text[:20000]}\n\nQuestion: {prompt}\n\nAnswer concisely. Use general knowledge if context is empty."
 
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.0-flash", 
-                contents=full_prompt
-            )
-            answer = response.text
-            st.markdown(answer)
-            active_chat["messages"].append({"role": "assistant", "content": answer})
-        except Exception as e:
-            st.error(f"Assistant Error: {e}")
+        # Implementation of Exponential Backoff for 429 Errors
+        max_retries = 3
+        retry_delay = 5 # seconds
+        success = False
+
+        for i in range(max_retries):
+            try:
+                # Using 2.5-flash-lite for higher free-tier limits
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash-lite", 
+                    contents=full_content
+                )
+                answer = response.text
+                st.markdown(answer)
+                active_chat["messages"].append({"role": "assistant", "content": answer})
+                success = True
+                break
+            except Exception as e:
+                if "429" in str(e) and i < max_retries - 1:
+                    st.warning(f"Quota busy. Retrying in {retry_delay}s... (Attempt {i+1}/{max_retries})")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2 # Double the wait time
+                else:
+                    st.error(f"Assistant Error: {e}")
+                    break
