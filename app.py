@@ -7,26 +7,36 @@ st.set_page_config(page_title="Internal Knowledge Bot", layout="wide")
 def get_backend():
     return ChatBackend()
 
-backend = get_backend()
+# Initialize the backend
+try:
+    backend = get_backend()
+except Exception as e:
+    st.error(f"Critical System Error: {e}")
+    st.stop()
 
 st.title("🛡️ Internal Knowledge Chatbot")
 
-# Sidebar
+# Sidebar Logic
 with st.sidebar:
-    if st.button("🗑️ Clear History"):
+    st.header("Settings")
+    if st.button("🗑️ Clear Chat History", use_container_width=True):
         backend.db.conn.execute("DELETE FROM messages")
         backend.db.conn.commit()
+        st.success("History Cleared!")
         st.rerun()
     
-    chat_log = "\n".join([f"{r.upper()}: {c}" for r, c in backend.db.get_all_history()])
-    st.download_button("📥 Download Log", chat_log, "history.txt")
+    # Generate download data
+    history = backend.db.get_all_history()
+    chat_log = "\n".join([f"{r.upper()}: {c}" for r, c in history])
+    st.download_button("📥 Download Chat Log", chat_log, "chat_log.txt", use_container_width=True)
 
-# Main Chat
+# Display Messages from DB
 for role, content in backend.db.get_all_history():
     with st.chat_message(role):
         st.markdown(content)
 
-if prompt := st.chat_input("Ask about your documents..."):
+# Handle Input
+if prompt := st.chat_input("Ask about the documents..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
@@ -34,8 +44,12 @@ if prompt := st.chat_input("Ask about your documents..."):
         try:
             response_generator = backend.get_streaming_response(prompt)
             full_response = st.write_stream(response_generator)
+            
+            # Save interaction to DB
             backend.db.save_message("user", prompt)
             backend.db.save_message("assistant", full_response)
+            
+            # Refresh to show new message properly
             st.rerun()
         except Exception as e:
-            st.error(f"Safety/API Error: This topic might be restricted by the provider. Details: {e}")
+            st.error(f"Assistant Error: {e}")
