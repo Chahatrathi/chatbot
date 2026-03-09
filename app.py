@@ -4,58 +4,57 @@ from google import genai
 from pypdf import PdfReader
 import docx
 import uuid
-import time
 
 # --- 1. INITIAL CONFIGURATION ---
+st.set_page_config(page_title="Assistant AI", layout="wide", page_icon="🤖")
+
+# Use a more robust secret check
 if "GOOGLE_API_KEY" in st.secrets:
-    client = genai.Client(
-        api_key=st.secrets["GOOGLE_API_KEY"],
-        http_options={'api_version': 'v1'}
-    )
+    client = genai.Client(api_key=st.secrets["GOOGLE_API_KEY"])
+elif os.getenv("GOOGLE_API_KEY"):
+    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 else:
-    st.error("Please add GOOGLE_API_KEY to Streamlit Secrets.")
+    st.error("🔑 API Key not found. Please add GOOGLE_API_KEY to .env or Streamlit Secrets.")
     st.stop()
 
 # --- 2. FILE EXTRACTION UTILITIES ---
 
-@st.cache_data(show_spinner=False)
-def extract_text_from_file(file_path_or_obj):
+@st.cache_data(show_spinner="Reading documents...")
+def extract_text_from_file(file_obj, is_path=False):
     try:
-        if isinstance(file_path_or_obj, str):
-            name = file_path_or_obj
-            is_path = True
+        if is_path:
+            name = file_obj
+            ext = os.path.splitext(name)[-1].lower()
         else:
-            name = file_path_or_obj.name
-            is_path = False
+            name = file_obj.name
+            ext = os.path.splitext(name)[-1].lower()
 
-        ext = os.path.splitext(name)[-1].lower()
         text = ""
         if ext == ".pdf":
-            f = open(file_path_or_obj, "rb") if is_path else file_path_or_obj
-            reader = PdfReader(f)
+            reader = PdfReader(file_obj)
             for page in reader.pages:
                 content = page.extract_text()
                 if content: text += content + "\n"
         elif ext == ".docx":
-            f = file_path_or_obj
-            doc = docx.Document(f)
+            doc = docx.Document(file_obj)
             text = "\n".join([p.text for p in doc.paragraphs])
         elif ext == ".txt":
             if is_path:
-                with open(file_path_or_obj, "r", encoding="utf-8", errors="ignore") as f:
+                with open(file_obj, "r", encoding="utf-8", errors="ignore") as f:
                     text = f.read()
             else:
-                text = file_path_or_obj.getvalue().decode("utf-8", errors="ignore")
+                text = file_obj.getvalue().decode("utf-8", errors="ignore")
         return text
     except Exception as e:
-        return ""
+        return f"Error reading {name}: {str(e)}"
 
 def get_backend_context(folder_name="documents"):
     context = ""
     if os.path.exists(folder_name):
         for filename in os.listdir(folder_name):
             file_path = os.path.join(folder_name, filename)
-            context += extract_text_from_file(file_path) + "\n"
+            if os.path.isfile(file_path):
+                context += extract_text_from_file(file_path, is_path=True) + "\n"
     return context
 
 # --- 3. SESSION MANAGEMENT ---
@@ -68,58 +67,92 @@ def start_new_chat():
     new_id = str(uuid.uuid4())
     st.session_state.all_chats[new_id] = {"name": "New Chat", "messages": []}
     st.session_state.current_chat_id = new_id
+    st.rerun()
 
-# --- 4. UI LAYOUT ---
-st.set_page_config(page_title="Assistant AI", layout="wide")
-st.title("🤖 Assistant Research Chatbot")
-
+# --- 4. SIDEBAR & UI ---
 with st.sidebar:
-    st.header("History")
-    if st.button("➕ Start New Chat"):
+    st.title("Settings")
+    if st.button("➕ Start New Chat", use_container_width=True):
         start_new_chat()
     
+    st.subheader("Chat History")
     chat_ids = list(st.session_state.all_chats.keys())
-    selected_chat = st.selectbox("Previous Chats:", options=chat_ids, 
-                                 format_func=lambda x: st.session_state.all_chats[x]["name"],
-                                 index=chat_ids.index(st.session_state.current_chat_id))
-    st.session_state.current_chat_id = selected_chat
+    
+    # Use a callback to update current_chat_id
+    def on_chat_change():
+        st.session_state.current_chat_id = st.session_state.selected_chat_ui
+
+    st.selectbox(
+        "Select Chat:",
+        options=chat_ids,
+        format_func=lambda x: st.session_state.all_chats[x]["name"],
+        key="selected_chat_ui",
+        on_change=on_chat_change,
+        index=chat_ids.index(st.session_state.current_chat_id)
+    )
+    
     st.divider()
     uploaded_files = st.file_uploader("Upload Additional Files", type=["pdf", "docx", "txt"], accept_multiple_files=True)
 
-# --- 5. CHAT LOGIC ---
+# --- 5. MAIN CHAT INTERFACE ---
+st.title("🤖 Assistant Research Chatbot")
+
 active_chat = st.session_state.all_chats[st.session_state.current_chat_id]
 
+# Display historical messages
 for msg in active_chat["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if prompt := st.chat_input("Ask a question..."):
+# User Input
+if prompt := st.chat_input("Ask about your documents..."):
+    # Set chat name based on first question
     if not active_chat["messages"]:
-        active_chat["name"] = prompt[:30] + "..."
+        active_chat["name"] = (prompt[:25] + "...") if len(prompt) > 25 else prompt
 
+    # Save and display user message
     active_chat["messages"].append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
+    # Generate Assistant Response
     with st.chat_message("assistant"):
+        # 1. Gather Context
         backend_text = get_backend_context("documents")
         uploaded_text = ""
         if uploaded_files:
             for f in uploaded_files:
                 uploaded_text += extract_text_from_file(f)
         
-        total_context = (backend_text + uploaded_text)[:15000]
+        # Limit context to keep prompt efficient (Gemini 2.0 can take more, but 30k is a good start)
+        total_context = (backend_text + uploaded_text)[:30000]
         
-        full_content = f"CONTEXT: {total_context}\n\nQUESTION: {prompt}\n\nINSTRUCTION: Answer using context. If empty, use general knowledge. Be direct."
+        # 2. Build Prompt
+        full_content = (
+            f"You are a helpful research assistant. Use the following context to answer the user.\n"
+            f"CONTEXT:\n{total_context}\n\n"
+            f"USER QUESTION: {prompt}\n\n"
+            f"INSTRUCTIONS: If the answer isn't in the context, use your general knowledge but mention it. "
+            f"Keep the formatting clean with markdown."
+        )
 
+        # 3. Stream the response
         try:
-            # Using stable gemini-2.0-flash
-            response = client.models.generate_content(
-                model="gemini-2.0-flash", 
+            placeholder = st.empty()
+            full_response = ""
+            
+            # Using the new Google GenAI SDK syntax
+            response_stream = client.models.generate_content_stream(
+                model="gemini-2.0-flash",
                 contents=full_content
             )
-            answer = response.text
-            st.markdown(answer)
-            active_chat["messages"].append({"role": "assistant", "content": answer})
+            
+            for chunk in response_stream:
+                full_response += chunk.text
+                placeholder.markdown(full_response + "▌")
+            
+            placeholder.markdown(full_response)
+            active_chat["messages"].append({"role": "assistant", "content": full_response})
+            
         except Exception as e:
-            st.error(f"Assistant Error: {e}")
+            st.error(f"Assistant Error: {str(e)}")
