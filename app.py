@@ -104,4 +104,4 @@ if user_input := st.chat_input("Ask a question..."):
             st.session_state.messages.append({"role": "assistant", "content": full_res})
             
         except Exception as e:
-            st.error(f"Execution Error: {e
+            st.error(f"Execution Error: {e}")
