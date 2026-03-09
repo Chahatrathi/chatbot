@@ -8,3 +8,4 @@ PyPDF2
 python-dotenv
 python-docx
 pypdf
+streamlit
