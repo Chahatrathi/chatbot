@@ -6,7 +6,6 @@ from PyPDF2 import PdfReader
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-# Load local .env file if it exists (for VS Code development)
 load_dotenv()
 
 class DatabaseManager:
@@ -15,9 +14,11 @@ class DatabaseManager:
         self.create_table()
 
     def create_table(self):
+        # Added session_id to separate different users
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
                 role TEXT,
                 content TEXT,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -25,25 +26,28 @@ class DatabaseManager:
         """)
         self.conn.commit()
 
-    def save_message(self, role, content):
-        self.conn.execute("INSERT INTO messages (role, content) VALUES (?, ?)", (role, content))
+    def save_message(self, session_id, role, content):
+        self.conn.execute(
+            "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)", 
+            (session_id, role, content)
+        )
         self.conn.commit()
 
-    def get_all_history(self):
-        cursor = self.conn.execute("SELECT role, content FROM messages ORDER BY timestamp ASC")
+    def get_session_history(self, session_id):
+        cursor = self.conn.execute(
+            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY timestamp ASC", 
+            (session_id,)
+        )
         return cursor.fetchall()
 
 class ChatBackend:
     def __init__(self):
-        # 1. Try Streamlit Secrets (Production) 2. Try .env (Local)
         api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        
         if not api_key:
-            st.error("API Key not found! Check your Secrets or .env file.")
+            st.error("API Key not found!")
             st.stop()
         
-        # UPGRADE: Using 'gemini-2.5-flash', the current stable 2026 workhorse.
-        # This fixes the 404 because gemini-1.5 has been retired.
+        # Upgraded to Gemini 2.5 Flash for 2026 stability
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash", 
             google_api_key=api_key,
@@ -80,16 +84,21 @@ class ChatBackend:
             except Exception as e:
                 st.error(f"Error reading {filename}: {e}")
         
-        cleaned_text = " ".join(combined_text.split())
-        return cleaned_text[:15000]
+        return " ".join(combined_text.split())[:15000]
 
-    def get_streaming_response(self, user_input):
-        raw_history = self.db.get_all_history()
+    def get_streaming_response(self, user_input, session_id):
+        # Retrieve history ONLY for this specific session
+        raw_history = self.db.get_session_history(session_id)
+        
         context_prompt = f"INTERNAL DOCUMENTS CONTEXT:\n{self.knowledge_base}\n\n"
+        
         messages = [
-            SystemMessage(content="You are a helpful assistant. Use the provided context.")
+            SystemMessage(content="You are a professional assistant. Use the context to answer accurately.")
         ]
-        for role, content in raw_history[-3:]:
+        
+        # Add the last 5 private messages from this specific user
+        for role, content in raw_history[-5:]:
             messages.append(HumanMessage(content=content) if role == "user" else AIMessage(content=content))
+        
         messages.append(HumanMessage(content=f"{context_prompt}USER QUESTION: {user_input}"))
         return self.llm.stream(messages)
