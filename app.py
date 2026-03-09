@@ -1,41 +1,35 @@
 import streamlit as st
 import os
-from io import BytesIO
+import google.generativeai as genai
+from pypdf import PdfReader
+import docx
 
-# --- ROBUST IMPORTS ---
-try:
-    from pypdf import PdfReader
-except ImportError:
-    st.error("Library 'pypdf' not found. Please ensure it is in requirements.txt")
+# --- 1. INITIAL CONFIGURATION ---
+# In Streamlit Cloud, add your API key to "Secrets"
+# Or replace with your key: genai.configure(api_key="YOUR_API_KEY")
+if "GOOGLE_API_KEY" in st.secrets:
+    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+else:
+    st.warning("Please add your GOOGLE_API_KEY to Streamlit Secrets to get live answers.")
 
-try:
-    import docx
-except ImportError:
-    st.error("Library 'python-docx' not found. Please ensure it is in requirements.txt")
-
-# --- 1. FILE EXTRACTION UTILITIES ---
-
-def extract_text(uploaded_file):
-    ext = os.path.splitext(uploaded_file.name)[-1].lower()
-    text = ""
-    try:
+# --- 2. FILE EXTRACTION UTILITY ---
+def extract_text(uploaded_files):
+    context = ""
+    for uploaded_file in uploaded_files:
+        ext = os.path.splitext(uploaded_file.name)[-1].lower()
         if ext == ".pdf":
             reader = PdfReader(uploaded_file)
             for page in reader.pages:
-                content = page.extract_text()
-                if content:
-                    text += content + "\n"
+                text = page.extract_text()
+                if text: context += text
         elif ext == ".docx":
             doc = docx.Document(uploaded_file)
-            text = "\n".join([para.text for para in doc.paragraphs])
+            context += "\n".join([para.text for para in doc.paragraphs])
         elif ext == ".txt":
-            text = uploaded_file.getvalue().decode("utf-8", errors="ignore")
-    except Exception as e:
-        return f"Error reading file: {e}"
-    return text
+            context += uploaded_file.getvalue().decode("utf-8")
+    return context
 
-# --- 2. SESSION STATE SETUP ---
-
+# --- 3. SESSION STATE & UI ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -43,75 +37,59 @@ def reset_chat():
     st.session_state.messages = []
     st.rerun()
 
-# --- 3. UI LAYOUT ---
-
-st.set_page_config(page_title="Assistant Research Bot", layout="wide")
-st.title("🤖 Assistant Chatbot")
+st.set_page_config(page_title="Assistant AI", layout="wide")
+st.title("🤖 Assistant Research Chatbot")
 
 with st.sidebar:
-    st.header("Control Panel")
-    # New Chat Option
     if st.button("➕ Start New Chat"):
         reset_chat()
-    
     st.divider()
-    
-    # File Upload Section
-    uploaded_files = st.file_uploader(
-        "Upload Project Documents", 
-        type=["pdf", "docx", "txt"], 
-        accept_multiple_files=True
-    )
-    
-    if uploaded_files:
-        st.success(f"✅ {len(uploaded_files)} files loaded successfully.")
+    uploaded_files = st.file_uploader("Upload Files", type=["pdf", "docx", "txt"], accept_multiple_files=True)
 
-# --- 4. CHAT INTERFACE ---
+# --- 4. CHAT LOGIC ---
+# Display historical messages
+for i, msg in enumerate(st.session_state.messages):
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if msg["role"] == "assistant":
+            st.download_button("📥 Download Answer", msg["content"], file_name=f"answer_{i}.txt", key=f"dl_{i}")
 
-# Display message history
-for i, message in enumerate(st.session_state.messages):
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        
-        # Individual Download for Assistant answers
-        if message["role"] == "assistant":
-            st.download_button(
-                label="📥 Download this answer",
-                data=message["content"],
-                file_name=f"assistant_response_{i}.txt",
-                mime="text/plain",
-                key=f"dl_{i}" 
-            )
-
-# Chat Input Logic
-if prompt := st.chat_input("How can the Assistant help you today?"):
-    # Add user message
+# Handle New Input
+if prompt := st.chat_input("Ask a specific question about your data..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Generate Assistant Response
     with st.chat_message("assistant"):
-        # Compile text from all uploaded documents for context
-        document_context = ""
-        if uploaded_files:
-            for f in uploaded_files:
-                document_context += extract_text(f) + "\n"
+        # 1. Get text from documents
+        doc_text = extract_text(uploaded_files) if uploaded_files else "No documents uploaded."
         
-        # This is where your AI Logic/API call would go. 
-        # For now, it simulates a response based on the "Assistant" identity.
-        response_text = f"Assistant: Based on the documents provided, here is the information regarding '{prompt}'.\n\n[Analysing context...]\n\nI have reviewed the uploaded files and found relevant data to answer your query. Please let me know if you need further details."
+        # 2. Build the AI Prompt
+        # This framing ensures the Assistant gives direct, accurate answers.
+        full_prompt = f"""
+        You are a highly accurate Research Assistant. 
+        CONTEXT FROM UPLOADED DOCUMENTS:
+        {doc_text[:15000]} 
         
-        st.markdown(response_text)
+        USER QUESTION:
+        {prompt}
         
-        # Add to history
-        st.session_state.messages.append({"role": "assistant", "content": response_text})
+        INSTRUCTIONS:
+        - Provide a direct, accurate answer based ONLY on the context above.
+        - If the answer isn't in the documents, say you don't have that specific data.
+        - Do not provide code unless specifically asked for code.
+        - Use professional, clinical language.
+        """
+
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content(full_prompt)
+            answer = response.text
+        except Exception as e:
+            answer = f"Assistant: I encountered an error processing that. Error: {str(e)}"
+
+        st.markdown(answer)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
         
-        # Individual Download for this specific new answer
-        st.download_button(
-            label="📥 Download this answer",
-            data=response_text,
-            file_name=f"assistant_response_latest.txt",
-            mime="text/plain",
-            key="dl_latest"
-        )
+        # Immediate Download Option
+        st.download_button("📥 Download Answer", answer, file_name="latest_answer.txt", key="dl_new")
