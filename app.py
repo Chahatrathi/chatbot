@@ -7,7 +7,6 @@ import uuid
 import time
 
 # --- 1. INITIAL CONFIGURATION ---
-# Use Streamlit Secrets: GOOGLE_API_KEY
 if "GOOGLE_API_KEY" in st.secrets:
     client = genai.Client(
         api_key=st.secrets["GOOGLE_API_KEY"],
@@ -17,7 +16,7 @@ else:
     st.error("Please add GOOGLE_API_KEY to your Streamlit Secrets.")
     st.stop()
 
-# --- 2. SESSION MANAGEMENT ---
+# --- 2. SESSION MANAGEMENT (History) ---
 if "all_chats" not in st.session_state:
     initial_id = str(uuid.uuid4())
     st.session_state.all_chats = {
@@ -73,10 +72,12 @@ with st.sidebar:
 # --- 5. CHAT LOGIC ---
 active_chat = st.session_state.all_chats[st.session_state.current_chat_id]
 
+# Display history
 for msg in active_chat["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
+# User Input
 if prompt := st.chat_input("Ask a question..."):
     if not active_chat["messages"]:
         active_chat["name"] = prompt[:30] + "..."
@@ -88,11 +89,13 @@ if prompt := st.chat_input("Ask a question..."):
     with st.chat_message("assistant"):
         doc_text = extract_text(uploaded_files) if uploaded_files else ""
         
-        # DEFINING THE PROMPT CORRECTLY
+        # PROMPT LOGIC: Primary context from backend files, Fallback to General Knowledge
         full_content = (
-            f"Context from documents: {doc_text[:25000]}\n\n"
-            f"Question: {prompt}\n\n"
-            f"Answer concisely. If the context is empty, use your general knowledge."
+            f"SYSTEM: You are a professional research assistant. \n"
+            f"BACKEND CONTEXT: {doc_text[:25000]}\n\n"
+            f"USER QUESTION: {prompt}\n\n"
+            f"INSTRUCTIONS: Use the backend context to answer. If the answer is not in the context, "
+            f"use your internal knowledge to provide a helpful, accurate response. Do not say you lack context."
         )
 
         max_retries = 3
@@ -100,9 +103,9 @@ if prompt := st.chat_input("Ask a question..."):
 
         for i in range(max_retries):
             try:
-                # Using latest Gemini 3 Flash for performance
+                # Using gemini-2.0-flash for maximum stability
                 response = client.models.generate_content(
-                    model="gemini-3-flash-preview", 
+                    model="gemini-2.0-flash", 
                     contents=full_content
                 )
                 answer = response.text
@@ -111,7 +114,7 @@ if prompt := st.chat_input("Ask a question..."):
                 break
             except Exception as e:
                 if "429" in str(e) and i < max_retries - 1:
-                    st.warning(f"Quota reached. Retrying in {retry_delay}s...")
+                    st.warning(f"Quota busy. Retrying in {retry_delay}s...")
                     time.sleep(retry_delay)
                     retry_delay *= 2
                 else:
