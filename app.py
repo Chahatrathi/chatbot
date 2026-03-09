@@ -7,10 +7,13 @@ import uuid
 import time
 
 # --- 1. INITIAL CONFIGURATION ---
+# Use 'gemini-2.5-flash' for the most stable price-performance balance
+MODEL_ID = "gemini-2.5-flash" 
+
 if "GOOGLE_API_KEY" in st.secrets:
     client = genai.Client(
         api_key=st.secrets["GOOGLE_API_KEY"],
-        http_options={'api_version': 'v1'}
+        http_options={'api_version': 'v1'} # Use stable v1 API
     )
 else:
     st.error("Please add GOOGLE_API_KEY to your Streamlit Secrets.")
@@ -74,11 +77,13 @@ with st.sidebar:
 # --- 5. CHAT LOGIC ---
 current_chat = st.session_state.all_chats[st.session_state.current_chat_id]
 
+# Display history (Direct answers only, no buttons)
 for msg in current_chat["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
 if prompt := st.chat_input("Ask a question..."):
+    # Rename chat on first message
     if not current_chat["messages"]:
         current_chat["name"] = prompt[:30] + "..."
 
@@ -87,13 +92,19 @@ if prompt := st.chat_input("Ask a question..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        doc_text = extract_text(uploaded_files) if uploaded_files else "No documents uploaded."
-        full_content = f"Context: {doc_text[:15000]}\n\nQuestion: {prompt}\n\nAnswer directly."
+        doc_text = extract_text(uploaded_files) if uploaded_files else "No documents provided."
+        
+        # Optimized prompt for directness
+        full_content = (
+            f"SYSTEM: Answer the question using the context provided below. Be direct and concise.\n"
+            f"CONTEXT: {doc_text[:20000]}\n\n"
+            f"USER QUESTION: {prompt}"
+        )
 
         try:
-            # Reverting to the most stable model name for v1 API
+            # Using stable 2.5-flash
             response = client.models.generate_content(
-                model="gemini-1.5-flash", 
+                model=MODEL_ID, 
                 contents=full_content
             )
             answer = response.text
@@ -102,13 +113,6 @@ if prompt := st.chat_input("Ask a question..."):
             
         except Exception as e:
             if "429" in str(e):
-                st.warning("⚠️ Rate limit reached. Retrying in 5 seconds...")
-                time.sleep(5)
-                try:
-                    response = client.models.generate_content(model="gemini-1.5-flash", contents=full_content)
-                    st.markdown(response.text)
-                    current_chat["messages"].append({"role": "assistant", "content": response.text})
-                except:
-                    st.error("🚨 Quota exceeded. Please wait a minute before trying again.")
+                st.error("🚨 Quota Exceeded. Please wait 60 seconds and try again.")
             else:
                 st.error(f"Assistant Error: {e}")
