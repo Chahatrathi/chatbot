@@ -13,26 +13,25 @@ if "GOOGLE_API_KEY" in st.secrets:
         http_options={'api_version': 'v1'}
     )
 else:
-    st.error("Please add GOOGLE_API_KEY to your Streamlit Secrets.")
+    st.error("Please add GOOGLE_API_KEY to Streamlit Secrets.")
     st.stop()
 
-# --- 2. FILE EXTRACTION UTILITIES ---
+# --- 2. OPTIMIZED FILE EXTRACTION ---
 
+@st.cache_data(show_spinner=False)
 def extract_text_from_file(file_path_or_obj):
-    """Extracts text from a file path (string) or a Streamlit uploaded file object."""
-    # Determine if it's a string path or an uploaded file object
-    if isinstance(file_path_or_obj, str):
-        name = file_path_or_obj
-        is_path = True
-    else:
-        name = file_path_or_obj.name
-        is_path = False
-
-    ext = os.path.splitext(name)[-1].lower()
-    text = ""
+    """Cached extraction to save processing time."""
     try:
+        if isinstance(file_path_or_obj, str):
+            name = file_path_or_obj
+            is_path = True
+        else:
+            name = file_path_or_obj.name
+            is_path = False
+
+        ext = os.path.splitext(name)[-1].lower()
+        text = ""
         if ext == ".pdf":
-            # If it's a path, open it; if it's an object, use it directly
             f = open(file_path_or_obj, "rb") if is_path else file_path_or_obj
             reader = PdfReader(f)
             for page in reader.pages:
@@ -41,32 +40,30 @@ def extract_text_from_file(file_path_or_obj):
         elif ext == ".docx":
             f = file_path_or_obj if not is_path else file_path_or_obj
             doc = docx.Document(f)
-            text = "\n".join([p.text for p in doc.paragraphs]) + "\n"
+            text = "\n".join([p.text for p in doc.paragraphs])
         elif ext == ".txt":
             if is_path:
                 with open(file_path_or_obj, "r", encoding="utf-8", errors="ignore") as f:
-                    text = f.read() + "\n"
+                    text = f.read()
             else:
-                text = file_path_or_obj.getvalue().decode("utf-8", errors="ignore") + "\n"
+                text = file_path_or_obj.getvalue().decode("utf-8", errors="ignore")
+        return text
     except Exception as e:
-        st.error(f"Error reading {name}: {e}")
-    return text
+        return f"Error reading {name}: {e}"
 
+@st.cache_data(ttl=3600) # Cache backend data for 1 hour to save tokens
 def get_backend_context(folder_name="documents"):
-    """Reads all files from the backend folder."""
     context = ""
     if os.path.exists(folder_name):
         for filename in os.listdir(folder_name):
             file_path = os.path.join(folder_name, filename)
-            context += extract_text_from_file(file_path)
+            context += extract_text_from_file(file_path) + "\n"
     return context
 
 # --- 3. SESSION MANAGEMENT ---
 if "all_chats" not in st.session_state:
     initial_id = str(uuid.uuid4())
-    st.session_state.all_chats = {
-        initial_id: {"name": "New Chat", "messages": []}
-    }
+    st.session_state.all_chats = {initial_id: {"name": "New Chat", "messages": []}}
     st.session_state.current_chat_id = initial_id
 
 def start_new_chat():
@@ -84,12 +81,9 @@ with st.sidebar:
         start_new_chat()
     
     chat_ids = list(st.session_state.all_chats.keys())
-    selected_chat = st.selectbox(
-        "Previous Chats:", 
-        options=chat_ids, 
-        format_func=lambda x: st.session_state.all_chats[x]["name"],
-        index=chat_ids.index(st.session_state.current_chat_id)
-    )
+    selected_chat = st.selectbox("Previous Chats:", options=chat_ids, 
+                                 format_func=lambda x: st.session_state.all_chats[x]["name"],
+                                 index=chat_ids.index(st.session_state.current_chat_id))
     st.session_state.current_chat_id = selected_chat
     st.divider()
     uploaded_files = st.file_uploader("Upload Additional Files", type=["pdf", "docx", "txt"], accept_multiple_files=True)
@@ -97,12 +91,10 @@ with st.sidebar:
 # --- 5. CHAT LOGIC ---
 active_chat = st.session_state.all_chats[st.session_state.current_chat_id]
 
-# Display history
 for msg in active_chat["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Handle Input
 if prompt := st.chat_input("Ask a question..."):
     if not active_chat["messages"]:
         active_chat["name"] = prompt[:30] + "..."
@@ -112,44 +104,29 @@ if prompt := st.chat_input("Ask a question..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        # 1. Load Backend Content
+        # Load backend context once and limit it to avoid 429 errors
         backend_text = get_backend_context("documents")
-        
-        # 2. Load Uploaded Content
         uploaded_text = ""
         if uploaded_files:
             for f in uploaded_files:
                 uploaded_text += extract_text_from_file(f)
         
-        total_context = backend_text + uploaded_text
+        # Limit total context to 10k characters (approx 2.5k tokens) to stay safe on Free Tier
+        total_context = (backend_text + uploaded_text)[:10000]
         
-        full_content = f"""
-        You are a research assistant. 
-        CONTEXT: {total_context[:25000]}
-        
-        QUESTION: {prompt}
-        
-        INSTRUCTIONS: Answer based on context. If context is empty, use general knowledge.
-        """
+        full_content = f"CONTEXT: {total_context}\n\nQUESTION: {prompt}\n\nAnswer concisely. Use general knowledge if context is insufficient."
 
-        # Retry Loop for Stability
-        success = False
-        for attempt in range(3):
-            try:
-                response = client.models.generate_content(
-                    model="gemini-2.0-flash", 
-                    contents=full_content
-                )
-                answer = response.text
-                st.markdown(answer)
-                active_chat["messages"].append({"role": "assistant", "content": answer})
-                success = True
-                break 
-            except Exception as e:
-                if "429" in str(e):
-                    wait = (attempt + 1) * 10
-                    st.warning(f"Quota busy. Retrying in {wait}s...")
-                    time.sleep(wait)
-                else:
-                    st.error(f"Assistant Error: {e}")
-                    break
+        try:
+            # Reverting to 1.5-Flash for better free tier stability than 2.0-Flash
+            response = client.models.generate_content(
+                model="gemini-1.5-flash", 
+                contents=full_content
+            )
+            answer = response.text
+            st.markdown(answer)
+            active_chat["messages"].append({"role": "assistant", "content": answer})
+        except Exception as e:
+            if "429" in str(e):
+                st.error("🚨 API Quota Full. Please wait 60 seconds. To fix this permanently, try uploading fewer/smaller files.")
+            else:
+                st.error(f"Assistant Error: {e}")
