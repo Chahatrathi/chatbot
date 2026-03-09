@@ -1,48 +1,101 @@
 import streamlit as st
-from backend import ChatBackend
+import os
+from pypdf import PdfReader
+import docx
+from io import BytesIO
 
-st.set_page_config(page_title="Secure Internal Bot", layout="wide")
+# --- 1. FILE EXTRACTION UTILITIES ---
 
-@st.cache_resource
-def get_backend():
-    return ChatBackend()
+def extract_text(uploaded_file):
+    ext = os.path.splitext(uploaded_file.name)[-1].lower()
+    text = ""
+    if ext == ".pdf":
+        reader = PdfReader(uploaded_file)
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+    elif ext == ".docx":
+        doc = docx.Document(uploaded_file)
+        text = "\n".join([para.text for para in doc.paragraphs])
+    elif ext == ".txt":
+        text = uploaded_file.getvalue().decode("utf-8")
+    return text
 
-backend = get_backend()
+# --- 2. SESSION STATE SETUP ---
 
-# Get the unique ID for this browser tab session
-from streamlit.runtime.scriptrunner import get_script_run_ctx
-ctx = get_script_run_ctx()
-session_id = ctx.session_id if ctx else "default_session"
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-st.title("🛡️ Private Internal Knowledge Bot")
-st.caption(f"Connected as Session: {session_id[:8]}...")
+# Function to start a new chat
+def reset_chat():
+    st.session_state.messages = []
+    st.rerun()
 
-# Sidebar - Specific to this user
+# --- 3. UI LAYOUT ---
+
+st.title("Assistant Chatbot")
+
 with st.sidebar:
-    if st.button("🗑️ Clear My History"):
-        backend.db.conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-        backend.db.conn.commit()
-        st.success("Your private history cleared!")
-        st.rerun()
+    st.header("Tools")
+    # New Chat Option
+    if st.button("➕ New Chat"):
+        reset_chat()
+    
+    st.divider()
+    
+    # File Upload Section
+    uploaded_files = st.file_uploader(
+        "Upload Documents (PDF, Word, Text)", 
+        type=["pdf", "docx", "txt"], 
+        accept_multiple_files=True
+    )
+    
+    if uploaded_files:
+        st.success(f"{len(uploaded_files)} file(s) uploaded!")
 
-# Display Private Messages
-for role, content in backend.db.get_session_history(session_id):
-    with st.chat_message(role):
-        st.markdown(content)
+# --- 4. CHAT INTERFACE ---
 
-# Handle Chat
-if prompt := st.chat_input("Ask a follow-up question..."):
+# Display message history
+for i, message in enumerate(st.session_state.messages):
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+        
+        # Add a download button ONLY for assistant answers
+        if message["role"] == "assistant":
+            st.download_button(
+                label="📥 Download this answer",
+                data=message["content"],
+                file_name=f"answer_{i}.txt",
+                mime="text/plain",
+                key=f"dl_{i}" # Unique key for every button
+            )
+
+# Chat Input Logic
+if prompt := st.chat_input("Ask about your documents..."):
+    # Add user message
+    st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
+    # Generate Assistant Response
     with st.chat_message("assistant"):
-        try:
-            # Pass session_id to ensure the bot remembers ONLY this user
-            response_generator = backend.get_streaming_response(prompt, session_id)
-            full_response = st.write_stream(response_generator)
-            
-            backend.db.save_message(session_id, "user", prompt)
-            backend.db.save_message(session_id, "assistant", full_response)
-            st.rerun()
-        except Exception as e:
-            st.error(f"System Error: {e}")
+        context = ""
+        if uploaded_files:
+            for f in uploaded_files:
+                context += extract_text(f) + "\n"
+        
+        # Placeholder for AI logic - Replace with your model call
+        response = f"Assistant: I have analyzed your files. You asked: '{prompt}'. Here is the data-driven answer based on your documents."
+        
+        st.markdown(response)
+        
+        # Add message to history
+        st.session_state.messages.append({"role": "assistant", "content": response})
+        
+        # Individual Download for the new answer
+        st.download_button(
+            label="📥 Download this answer",
+            data=response,
+            file_name=f"answer_{len(st.session_state.messages)}.txt",
+            mime="text/plain",
+            key=f"dl_new"
+        )
