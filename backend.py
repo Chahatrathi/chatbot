@@ -39,19 +39,17 @@ class ChatBackend:
         api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
         
         if not api_key:
-            st.error("API Key not found! Check your Secrets or .env file.")
+            st.error("API Key not found! Please check your Secrets or .env file.")
             st.stop()
         
-        # KEY FIX: Explicitly forcing 'v1' API version to avoid the 404 error
-        # Some versions of LangChain use 'api_version', others use 'version'.
-        # We provide both to ensure compatibility.
+        # FINAL FIX: Provide api_version ONLY ONCE as a direct argument.
+        # This prevents the pydantic_core.ValidationError (duplicate value error).
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash", 
             google_api_key=api_key,
             streaming=True,
             temperature=0,
-            api_version="v1",  # Primary fix
-            model_kwargs={"api_version": "v1"}, # Fallback fix for newer SDKs
+            api_version="v1",  
             safety_settings={
                 "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
                 "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
@@ -89,15 +87,14 @@ class ChatBackend:
     def get_streaming_response(self, user_input):
         raw_history = self.db.get_all_history()
         
-        # Combine context and question into a single human prompt
-        # This is more stable than using a heavy SystemMessage
+        # We wrap the context inside the human message for maximum safety-filter bypass
         context_prompt = f"INTERNAL DOCUMENTS CONTEXT:\n{self.knowledge_base}\n\n"
         
         messages = [
-            SystemMessage(content="You are a helpful assistant. Use the provided context to answer questions accurately.")
+            SystemMessage(content="You are a helpful assistant. Use the provided context to answer questions.")
         ]
         
-        # Include last 3 exchanges for context
+        # Include last 3 exchanges for context memory
         for role, content in raw_history[-3:]:
             messages.append(HumanMessage(content=content) if role == "user" else AIMessage(content=content))
         
