@@ -133,4 +133,23 @@ if prompt := st.chat_input("Ask a question..."):
         """
 
         # Retry Loop for Stability
-        success =
+        success = False
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash", 
+                    contents=full_content
+                )
+                answer = response.text
+                st.markdown(answer)
+                active_chat["messages"].append({"role": "assistant", "content": answer})
+                success = True
+                break 
+            except Exception as e:
+                if "429" in str(e):
+                    wait = (attempt + 1) * 10
+                    st.warning(f"Quota busy. Retrying in {wait}s...")
+                    time.sleep(wait)
+                else:
+                    st.error(f"Assistant Error: {e}")
+                    break
