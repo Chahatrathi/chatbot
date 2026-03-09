@@ -42,14 +42,16 @@ class ChatBackend:
             st.error("API Key not found! Check your Secrets or .env file.")
             st.stop()
         
-        # KEY FIX: Explicitly forcing 'v1' through model_kwargs and using base name
+        # KEY FIX: Explicitly forcing 'v1' API version to avoid the 404 error
+        # Some versions of LangChain use 'api_version', others use 'version'.
+        # We provide both to ensure compatibility.
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-flash", 
             google_api_key=api_key,
             streaming=True,
-            temperature=0.1,
-            # This forces the stable production endpoint
-            model_kwargs={"api_version": "v1"}, 
+            temperature=0,
+            api_version="v1",  # Primary fix
+            model_kwargs={"api_version": "v1"}, # Fallback fix for newer SDKs
             safety_settings={
                 "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
                 "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
@@ -80,20 +82,25 @@ class ChatBackend:
             except Exception as e:
                 st.error(f"Error reading {filename}: {e}")
         
-        return " ".join(combined_text.split())[:15000]
+        # Clean text and limit size to ensure stability
+        cleaned_text = " ".join(combined_text.split())
+        return cleaned_text[:15000]
 
     def get_streaming_response(self, user_input):
         raw_history = self.db.get_all_history()
         
-        # We use a User message for context to avoid system-level safety blocks
-        context_block = f"VERIFIED CONTEXT: {self.knowledge_base}\n\n"
+        # Combine context and question into a single human prompt
+        # This is more stable than using a heavy SystemMessage
+        context_prompt = f"INTERNAL DOCUMENTS CONTEXT:\n{self.knowledge_base}\n\n"
         
         messages = [
-            SystemMessage(content="You are a helpful AI. Use the provided context to answer.")
+            SystemMessage(content="You are a helpful assistant. Use the provided context to answer questions accurately.")
         ]
         
-        for role, content in raw_history[-5:]:
+        # Include last 3 exchanges for context
+        for role, content in raw_history[-3:]:
             messages.append(HumanMessage(content=content) if role == "user" else AIMessage(content=content))
         
-        messages.append(HumanMessage(content=f"{context_block}QUESTION: {user_input}"))
+        messages.append(HumanMessage(content=f"{context_prompt}USER QUESTION: {user_input}"))
+        
         return self.llm.stream(messages)
