@@ -3,29 +3,26 @@ import os
 import time
 import docx
 from google import genai
-from google.genai import types
 from pypdf import PdfReader
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # --- 1. PRO CONFIGURATION ---
-st.set_page_config(page_title="Gemini Pro Assistant", layout="wide", page_icon="🤖")
+st.set_page_config(page_title="Pro Research Bot", layout="wide", page_icon="🤖")
 
 def get_client():
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
         st.error("🔑 API Key missing! Check your Secrets or .env file.")
         st.stop()
-    # Using v1 for stability; the SDK handles the rest
     return genai.Client(api_key=api_key)
 
 client = get_client()
 
-# --- 2. FAIL-SAFE GENERATION ---
-def generate_response(prompt_text, uploads):
-    # Try the fastest stable model first, then fall back
-    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash"]
+# --- 2. EXPONENTIAL BACKOFF LOGIC ---
+def generate_response_with_retry(prompt_text, uploads, retries=3):
+    """Eradicates 429 errors by catching them and retrying after a delay."""
     
     # Compile context
     context = ""
@@ -36,19 +33,25 @@ def generate_response(prompt_text, uploads):
         for f in uploads:
             context += extract_text(f) + "\n"
     
-    full_query = f"CONTEXT:\n{context[:50000]}\n\nQUESTION: {prompt_text}"
-
-    for model_id in models_to_try:
+    # Keep context within reasonable limits to save tokens
+    full_query = f"CONTEXT:\n{context[:30000]}\n\nQUESTION: {prompt_text}"
+    
+    delay = 5  # Initial wait time in seconds
+    for i in range(retries):
         try:
             return client.models.generate_content_stream(
-                model=model_id,
+                model="gemini-2.0-flash",
                 contents=full_query
             )
         except Exception as e:
-            if "404" in str(e):
-                continue # Try the next model in the list
+            error_msg = str(e)
+            if "429" in error_msg:
+                if i < retries - 1:
+                    st.warning(f"Quota exceeded. Retrying in {delay} seconds... (Attempt {i+1})")
+                    time.sleep(delay)
+                    delay *= 2  # Double the wait time for the next retry
+                    continue
             raise e
-    raise Exception("No supported models found. Check your API project settings.")
 
 # --- 3. DATA EXTRACTION ---
 @st.cache_data(show_spinner=False)
@@ -71,16 +74,16 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 with st.sidebar:
-    st.title("Pro Settings")
-    if st.button("🗑️ Clear History"):
+    st.title("Pro Controls")
+    if st.button("🗑️ Clear Chat & Cache"):
         st.session_state.messages = []
         st.cache_data.clear()
         st.rerun()
-    st.divider()
     uploads = st.file_uploader("Knowledge Base", type=["pdf", "txt", "docx"], accept_multiple_files=True)
 
 st.title("🤖 Assistant Research Chatbot")
 
+# Display History
 for m in st.session_state.messages:
     with st.chat_message(m["role"]): st.markdown(m["content"])
 
@@ -93,7 +96,8 @@ if user_input := st.chat_input("Ask a question..."):
             placeholder = st.empty()
             full_res = ""
             
-            stream = generate_response(user_input, uploads)
+            # Use the retry-wrapped function
+            stream = generate_response_with_retry(user_input, uploads)
             
             for chunk in stream:
                 if chunk.text:
