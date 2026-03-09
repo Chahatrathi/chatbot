@@ -9,22 +9,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- 1. PRO CONFIGURATION ---
-st.set_page_config(page_title="Pro Research Bot", layout="wide", page_icon="🤖")
+st.set_page_config(page_title="Gemini Pro Research Bot", layout="wide")
 
 def get_client():
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        st.error("🔑 API Key missing! Check your Secrets or .env file.")
+        st.error("🔑 API Key missing! Add it to .env or Streamlit Secrets.")
         st.stop()
     return genai.Client(api_key=api_key)
 
 client = get_client()
 
-# --- 2. EXPONENTIAL BACKOFF LOGIC ---
-def generate_response_with_retry(prompt_text, uploads, retries=3):
-    """Eradicates 429 errors by catching them and retrying after a delay."""
-    
-    # Compile context
+# --- 2. THE ERROR ERADICATOR (Retry Logic) ---
+def safe_generate(prompt_text, uploads):
+    # Compile context from files
     context = ""
     if os.path.exists("documents"):
         for f in os.listdir("documents"):
@@ -33,24 +31,22 @@ def generate_response_with_retry(prompt_text, uploads, retries=3):
         for f in uploads:
             context += extract_text(f) + "\n"
     
-    # Keep context within reasonable limits to save tokens
     full_query = f"CONTEXT:\n{context[:30000]}\n\nQUESTION: {prompt_text}"
     
-    delay = 5  # Initial wait time in seconds
-    for i in range(retries):
+    # Retry Loop
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
             return client.models.generate_content_stream(
                 model="gemini-2.0-flash",
                 contents=full_query
             )
         except Exception as e:
-            error_msg = str(e)
-            if "429" in error_msg:
-                if i < retries - 1:
-                    st.warning(f"Quota exceeded. Retrying in {delay} seconds... (Attempt {i+1})")
-                    time.sleep(delay)
-                    delay *= 2  # Double the wait time for the next retry
-                    continue
+            if "429" in str(e):
+                wait_time = 15 * (attempt + 1)
+                st.warning(f"Quota reached. Auto-retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
             raise e
 
 # --- 3. DATA EXTRACTION ---
@@ -75,19 +71,19 @@ if "messages" not in st.session_state:
 
 with st.sidebar:
     st.title("Pro Controls")
-    if st.button("🗑️ Clear Chat & Cache"):
+    if st.button("🗑️ Reset Session"):
         st.session_state.messages = []
         st.cache_data.clear()
         st.rerun()
-    uploads = st.file_uploader("Knowledge Base", type=["pdf", "txt", "docx"], accept_multiple_files=True)
+    uploads = st.file_uploader("Upload Files", type=["pdf", "txt", "docx"], accept_multiple_files=True)
 
 st.title("🤖 Assistant Research Chatbot")
 
-# Display History
+# Show history
 for m in st.session_state.messages:
     with st.chat_message(m["role"]): st.markdown(m["content"])
 
-if user_input := st.chat_input("Ask a question..."):
+if user_input := st.chat_input("Ask about equity vs debt..."):
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"): st.markdown(user_input)
 
@@ -96,8 +92,7 @@ if user_input := st.chat_input("Ask a question..."):
             placeholder = st.empty()
             full_res = ""
             
-            # Use the retry-wrapped function
-            stream = generate_response_with_retry(user_input, uploads)
+            stream = safe_generate(user_input, uploads)
             
             for chunk in stream:
                 if chunk.text:
