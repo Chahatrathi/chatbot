@@ -3,41 +3,52 @@ import os
 import time
 import docx
 from google import genai
-from google.genai import types, errors
+from google.genai import types
 from pypdf import PdfReader
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # --- 1. PRO CONFIGURATION ---
-st.set_page_config(page_title="Gemini Pro Assistant", layout="wide")
+st.set_page_config(page_title="Gemini Pro Assistant", layout="wide", page_icon="🤖")
 
 def get_client():
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        st.error("🔑 API Key missing! Add to .env or Streamlit Secrets.")
+        st.error("🔑 API Key missing! Check your Secrets or .env file.")
         st.stop()
-    # Initializing with the latest v1 stable API
-    return genai.Client(api_key=api_key, http_options=types.HttpOptions(api_version="v1"))
+    # Using v1 for stability; the SDK handles the rest
+    return genai.Client(api_key=api_key)
 
 client = get_client()
 
-# --- 2. ROBUST RETRY LOGIC ---
-def generate_with_backoff(model_id, contents, retries=3):
-    """Retries the request with increasing delays if a 429 occurs."""
-    for i in range(retries):
+# --- 2. FAIL-SAFE GENERATION ---
+def generate_response(prompt_text, uploads):
+    # Try the fastest stable model first, then fall back
+    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash"]
+    
+    # Compile context
+    context = ""
+    if os.path.exists("documents"):
+        for f in os.listdir("documents"):
+            context += extract_text(os.path.join("documents", f), is_path=True) + "\n"
+    if uploads:
+        for f in uploads:
+            context += extract_text(f) + "\n"
+    
+    full_query = f"CONTEXT:\n{context[:50000]}\n\nQUESTION: {prompt_text}"
+
+    for model_id in models_to_try:
         try:
             return client.models.generate_content_stream(
                 model=model_id,
-                contents=contents
+                contents=full_query
             )
         except Exception as e:
-            if "429" in str(e) and i < retries - 1:
-                wait_time = (i + 1) * 10  # 10s, 20s...
-                st.warning(f"Quota reached. Sleeping {wait_time}s before retry...")
-                time.sleep(wait_time)
-                continue
+            if "404" in str(e):
+                continue # Try the next model in the list
             raise e
+    raise Exception("No supported models found. Check your API project settings.")
 
 # --- 3. DATA EXTRACTION ---
 @st.cache_data(show_spinner=False)
@@ -55,46 +66,34 @@ def extract_text(file_source, is_path=False):
     except: return ""
     return ""
 
-# --- 4. UI & CHAT ---
+# --- 4. UI LOGIC ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 with st.sidebar:
-    st.title("Pro Controls")
-    if st.button("🗑️ Reset All"):
+    st.title("Pro Settings")
+    if st.button("🗑️ Clear History"):
         st.session_state.messages = []
         st.cache_data.clear()
         st.rerun()
-    uploads = st.file_uploader("Upload Knowledge Base", type=["pdf", "txt", "docx"], accept_multiple_files=True)
+    st.divider()
+    uploads = st.file_uploader("Knowledge Base", type=["pdf", "txt", "docx"], accept_multiple_files=True)
 
 st.title("🤖 Assistant Research Chatbot")
 
 for m in st.session_state.messages:
     with st.chat_message(m["role"]): st.markdown(m["content"])
 
-if prompt := st.chat_input("Ask a question..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"): st.markdown(prompt)
+if user_input := st.chat_input("Ask a question..."):
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    with st.chat_message("user"): st.markdown(user_input)
 
     with st.chat_message("assistant"):
-        # Compile local knowledge
-        context = ""
-        if os.path.exists("documents"):
-            for f in os.listdir("documents"):
-                context += extract_text(os.path.join("documents", f), is_path=True) + "\n"
-        if uploads:
-            for f in uploads: context += extract_text(f) + "\n"
-        
         try:
             placeholder = st.empty()
             full_res = ""
             
-            # Using 'gemini-3-flash-preview' for 2026 performance (or 'gemini-2.0-flash')
-            # Ensure model ID is just the string, no "models/" prefix.
-            stream = generate_with_backoff(
-                model_id="gemini-3-flash-preview", 
-                contents=f"CONTEXT:\n{context[:40000]}\n\nQUESTION: {prompt}"
-            )
+            stream = generate_response(user_input, uploads)
             
             for chunk in stream:
                 if chunk.text:
@@ -105,4 +104,4 @@ if prompt := st.chat_input("Ask a question..."):
             st.session_state.messages.append({"role": "assistant", "content": full_res})
             
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Execution Error: {e
