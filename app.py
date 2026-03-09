@@ -50,17 +50,17 @@ def extract_text(uploaded_files):
     return context
 
 # --- 4. UI LAYOUT ---
-st.set_page_config(page_title="Assistant Research Bot", layout="wide")
+st.set_page_config(page_title="Assistant AI", layout="wide")
 st.title("🤖 Assistant Research Chatbot")
 
 with st.sidebar:
-    st.header("Chat History")
+    st.header("History")
     if st.button("➕ Start New Chat"):
         start_new_chat()
     
     chat_ids = list(st.session_state.all_chats.keys())
     selected_chat = st.selectbox(
-        "History:", 
+        "Previous Chats:", 
         options=chat_ids, 
         format_func=lambda x: st.session_state.all_chats[x]["name"],
         index=chat_ids.index(st.session_state.current_chat_id)
@@ -72,10 +72,12 @@ with st.sidebar:
 # --- 5. CHAT LOGIC ---
 active_chat = st.session_state.all_chats[st.session_state.current_chat_id]
 
+# Display history
 for msg in active_chat["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
+# Handle Input
 if prompt := st.chat_input("Ask a question..."):
     if not active_chat["messages"]:
         active_chat["name"] = prompt[:30] + "..."
@@ -85,17 +87,4 @@ if prompt := st.chat_input("Ask a question..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        doc_text = extract_text(uploaded_files) if uploaded_files else ""
-        
-        full_content = (
-            f"SYSTEM: Use the context below to answer. If no context exists, use general knowledge.\n"
-            f"CONTEXT: {doc_text[:20000]}\n\n"
-            f"QUESTION: {prompt}"
-        )
-
-        # Retry logic for 429 Resource Exhausted
-        success = False
-        for attempt in range(3):
-            try:
-                # Using 2.5-flash-lite for better free-tier request limits
-                response
+        doc_text = extract_text(uploaded_files) if uploaded_files else
