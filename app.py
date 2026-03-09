@@ -16,11 +16,10 @@ else:
     st.error("Please add GOOGLE_API_KEY to Streamlit Secrets.")
     st.stop()
 
-# --- 2. OPTIMIZED FILE EXTRACTION ---
+# --- 2. FILE EXTRACTION UTILITIES ---
 
 @st.cache_data(show_spinner=False)
 def extract_text_from_file(file_path_or_obj):
-    """Cached extraction to save processing time."""
     try:
         if isinstance(file_path_or_obj, str):
             name = file_path_or_obj
@@ -38,7 +37,7 @@ def extract_text_from_file(file_path_or_obj):
                 content = page.extract_text()
                 if content: text += content + "\n"
         elif ext == ".docx":
-            f = file_path_or_obj if not is_path else file_path_or_obj
+            f = file_path_or_obj
             doc = docx.Document(f)
             text = "\n".join([p.text for p in doc.paragraphs])
         elif ext == ".txt":
@@ -49,9 +48,8 @@ def extract_text_from_file(file_path_or_obj):
                 text = file_path_or_obj.getvalue().decode("utf-8", errors="ignore")
         return text
     except Exception as e:
-        return f"Error reading {name}: {e}"
+        return ""
 
-@st.cache_data(ttl=3600) # Cache backend data for 1 hour to save tokens
 def get_backend_context(folder_name="documents"):
     context = ""
     if os.path.exists(folder_name):
@@ -104,29 +102,24 @@ if prompt := st.chat_input("Ask a question..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        # Load backend context once and limit it to avoid 429 errors
         backend_text = get_backend_context("documents")
         uploaded_text = ""
         if uploaded_files:
             for f in uploaded_files:
                 uploaded_text += extract_text_from_file(f)
         
-        # Limit total context to 10k characters (approx 2.5k tokens) to stay safe on Free Tier
-        total_context = (backend_text + uploaded_text)[:10000]
+        total_context = (backend_text + uploaded_text)[:15000]
         
-        full_content = f"CONTEXT: {total_context}\n\nQUESTION: {prompt}\n\nAnswer concisely. Use general knowledge if context is insufficient."
+        full_content = f"CONTEXT: {total_context}\n\nQUESTION: {prompt}\n\nINSTRUCTION: Answer using context. If empty, use general knowledge. Be direct."
 
         try:
-            # Reverting to 1.5-Flash for better free tier stability than 2.0-Flash
+            # Using stable gemini-2.0-flash
             response = client.models.generate_content(
-                model="gemini-1.5-flash", 
+                model="gemini-2.0-flash", 
                 contents=full_content
             )
             answer = response.text
             st.markdown(answer)
             active_chat["messages"].append({"role": "assistant", "content": answer})
         except Exception as e:
-            if "429" in str(e):
-                st.error("🚨 API Quota Full. Please wait 60 seconds. To fix this permanently, try uploading fewer/smaller files.")
-            else:
-                st.error(f"Assistant Error: {e}")
+            st.error(f"Assistant Error: {e}")
