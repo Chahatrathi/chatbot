@@ -120,4 +120,42 @@ for msg in active_chat["messages"]:
 # User prompt
 if user_input := st.chat_input("Ask a question about your data..."):
     # Update chat name if first message
-    if not
+    if not active_chat["messages"]:
+        active_chat["name"] = user_input[:30] + "..."
+
+    active_chat["messages"].append({"role": "user", "content": user_input})
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    with st.chat_message("assistant"):
+        # Compile Context
+        context = get_context_from_folder()
+        if uploads:
+            for f in uploads:
+                context += extract_text(f) + "\n"
+        
+        # Limit context to keep within free-tier token limits (approx 30k chars)
+        context = context[:30000]
+        
+        full_prompt = (
+            f"SYSTEM: Use the following context to answer precisely. If not found, use general knowledge.\n"
+            f"CONTEXT:\n{context}\n\n"
+            f"USER QUESTION: {user_input}"
+        )
+
+        try:
+            placeholder = st.empty()
+            full_response = ""
+            
+            # Use retry-wrapped streaming
+            stream = generate_response_with_retry(full_prompt)
+            
+            for chunk in stream:
+                full_response += chunk.text
+                placeholder.markdown(full_response + "▌")
+            
+            placeholder.markdown(full_response)
+            active_chat["messages"].append({"role": "assistant", "content": full_response})
+            
+        except Exception as e:
+            st.error(f"Failed after retries: {e}")
