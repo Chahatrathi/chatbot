@@ -1,55 +1,48 @@
 import streamlit as st
 from backend import ChatBackend
 
-st.set_page_config(page_title="Internal Knowledge Bot", layout="wide")
+st.set_page_config(page_title="Secure Internal Bot", layout="wide")
 
 @st.cache_resource
 def get_backend():
     return ChatBackend()
 
-# Initialize the backend
-try:
-    backend = get_backend()
-except Exception as e:
-    st.error(f"Critical System Error: {e}")
-    st.stop()
+backend = get_backend()
 
-st.title("🛡️ Internal Knowledge Chatbot")
+# Get the unique ID for this browser tab session
+from streamlit.runtime.scriptrunner import get_script_run_ctx
+ctx = get_script_run_ctx()
+session_id = ctx.session_id if ctx else "default_session"
 
-# Sidebar Logic
+st.title("🛡️ Private Internal Knowledge Bot")
+st.caption(f"Connected as Session: {session_id[:8]}...")
+
+# Sidebar - Specific to this user
 with st.sidebar:
-    st.header("Settings")
-    if st.button("🗑️ Clear Chat History", use_container_width=True):
-        backend.db.conn.execute("DELETE FROM messages")
+    if st.button("🗑️ Clear My History"):
+        backend.db.conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
         backend.db.conn.commit()
-        st.success("History Cleared!")
+        st.success("Your private history cleared!")
         st.rerun()
-    
-    # Generate download data
-    history = backend.db.get_all_history()
-    chat_log = "\n".join([f"{r.upper()}: {c}" for r, c in history])
-    st.download_button("📥 Download Chat Log", chat_log, "chat_log.txt", use_container_width=True)
 
-# Display Messages from DB
-for role, content in backend.db.get_all_history():
+# Display Private Messages
+for role, content in backend.db.get_session_history(session_id):
     with st.chat_message(role):
         st.markdown(content)
 
-# Handle Input
-if prompt := st.chat_input("Ask about the documents..."):
+# Handle Chat
+if prompt := st.chat_input("Ask a follow-up question..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
         try:
-            response_generator = backend.get_streaming_response(prompt)
+            # Pass session_id to ensure the bot remembers ONLY this user
+            response_generator = backend.get_streaming_response(prompt, session_id)
             full_response = st.write_stream(response_generator)
             
-            # Save interaction to DB
-            backend.db.save_message("user", prompt)
-            backend.db.save_message("assistant", full_response)
-            
-            # Refresh to show new message properly
+            backend.db.save_message(session_id, "user", prompt)
+            backend.db.save_message(session_id, "assistant", full_response)
             st.rerun()
         except Exception as e:
-            st.error(f"Assistant Error: {e}")
+            st.error(f"System Error: {e}")
