@@ -91,16 +91,24 @@ if prompt := st.chat_input("Ask a question..."):
         full_content = f"Context: {doc_text[:15000]}\n\nQuestion: {prompt}\n\nAnswer directly."
 
         try:
-            # Using 1.5-flash-8b for higher rate limits on free tier
+            # Reverting to the most stable model name for v1 API
             response = client.models.generate_content(
-                model="gemini-1.5-flash-8b", 
+                model="gemini-1.5-flash", 
                 contents=full_content
             )
             answer = response.text
             st.markdown(answer)
             current_chat["messages"].append({"role": "assistant", "content": answer})
+            
         except Exception as e:
             if "429" in str(e):
-                st.error("🚨 Quota Exceeded: The Free Tier limit has been reached. Please wait about 60 seconds before asking another question.")
+                st.warning("⚠️ Rate limit reached. Retrying in 5 seconds...")
+                time.sleep(5)
+                try:
+                    response = client.models.generate_content(model="gemini-1.5-flash", contents=full_content)
+                    st.markdown(response.text)
+                    current_chat["messages"].append({"role": "assistant", "content": response.text})
+                except:
+                    st.error("🚨 Quota exceeded. Please wait a minute before trying again.")
             else:
                 st.error(f"Assistant Error: {e}")
