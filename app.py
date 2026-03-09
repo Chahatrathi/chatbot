@@ -1,23 +1,37 @@
 import streamlit as st
 import os
-from pypdf import PdfReader
-import docx
 from io import BytesIO
+
+# --- ROBUST IMPORTS ---
+try:
+    from pypdf import PdfReader
+except ImportError:
+    st.error("Library 'pypdf' not found. Please ensure it is in requirements.txt")
+
+try:
+    import docx
+except ImportError:
+    st.error("Library 'python-docx' not found. Please ensure it is in requirements.txt")
 
 # --- 1. FILE EXTRACTION UTILITIES ---
 
 def extract_text(uploaded_file):
     ext = os.path.splitext(uploaded_file.name)[-1].lower()
     text = ""
-    if ext == ".pdf":
-        reader = PdfReader(uploaded_file)
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
-    elif ext == ".docx":
-        doc = docx.Document(uploaded_file)
-        text = "\n".join([para.text for para in doc.paragraphs])
-    elif ext == ".txt":
-        text = uploaded_file.getvalue().decode("utf-8")
+    try:
+        if ext == ".pdf":
+            reader = PdfReader(uploaded_file)
+            for page in reader.pages:
+                content = page.extract_text()
+                if content:
+                    text += content + "\n"
+        elif ext == ".docx":
+            doc = docx.Document(uploaded_file)
+            text = "\n".join([para.text for para in doc.paragraphs])
+        elif ext == ".txt":
+            text = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+    except Exception as e:
+        return f"Error reading file: {e}"
     return text
 
 # --- 2. SESSION STATE SETUP ---
@@ -25,32 +39,32 @@ def extract_text(uploaded_file):
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Function to start a new chat
 def reset_chat():
     st.session_state.messages = []
     st.rerun()
 
 # --- 3. UI LAYOUT ---
 
-st.title("Assistant Chatbot")
+st.set_page_config(page_title="Assistant Research Bot", layout="wide")
+st.title("🤖 Assistant Chatbot")
 
 with st.sidebar:
-    st.header("Tools")
+    st.header("Control Panel")
     # New Chat Option
-    if st.button("➕ New Chat"):
+    if st.button("➕ Start New Chat"):
         reset_chat()
     
     st.divider()
     
     # File Upload Section
     uploaded_files = st.file_uploader(
-        "Upload Documents (PDF, Word, Text)", 
+        "Upload Project Documents", 
         type=["pdf", "docx", "txt"], 
         accept_multiple_files=True
     )
     
     if uploaded_files:
-        st.success(f"{len(uploaded_files)} file(s) uploaded!")
+        st.success(f"✅ {len(uploaded_files)} files loaded successfully.")
 
 # --- 4. CHAT INTERFACE ---
 
@@ -59,18 +73,18 @@ for i, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         
-        # Add a download button ONLY for assistant answers
+        # Individual Download for Assistant answers
         if message["role"] == "assistant":
             st.download_button(
                 label="📥 Download this answer",
                 data=message["content"],
-                file_name=f"answer_{i}.txt",
+                file_name=f"assistant_response_{i}.txt",
                 mime="text/plain",
-                key=f"dl_{i}" # Unique key for every button
+                key=f"dl_{i}" 
             )
 
 # Chat Input Logic
-if prompt := st.chat_input("Ask about your documents..."):
+if prompt := st.chat_input("How can the Assistant help you today?"):
     # Add user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -78,24 +92,26 @@ if prompt := st.chat_input("Ask about your documents..."):
 
     # Generate Assistant Response
     with st.chat_message("assistant"):
-        context = ""
+        # Compile text from all uploaded documents for context
+        document_context = ""
         if uploaded_files:
             for f in uploaded_files:
-                context += extract_text(f) + "\n"
+                document_context += extract_text(f) + "\n"
         
-        # Placeholder for AI logic - Replace with your model call
-        response = f"Assistant: I have analyzed your files. You asked: '{prompt}'. Here is the data-driven answer based on your documents."
+        # This is where your AI Logic/API call would go. 
+        # For now, it simulates a response based on the "Assistant" identity.
+        response_text = f"Assistant: Based on the documents provided, here is the information regarding '{prompt}'.\n\n[Analysing context...]\n\nI have reviewed the uploaded files and found relevant data to answer your query. Please let me know if you need further details."
         
-        st.markdown(response)
+        st.markdown(response_text)
         
-        # Add message to history
-        st.session_state.messages.append({"role": "assistant", "content": response})
+        # Add to history
+        st.session_state.messages.append({"role": "assistant", "content": response_text})
         
-        # Individual Download for the new answer
+        # Individual Download for this specific new answer
         st.download_button(
             label="📥 Download this answer",
-            data=response,
-            file_name=f"answer_{len(st.session_state.messages)}.txt",
+            data=response_text,
+            file_name=f"assistant_response_latest.txt",
             mime="text/plain",
-            key=f"dl_new"
+            key="dl_latest"
         )
