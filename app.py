@@ -5,9 +5,9 @@ from pypdf import PdfReader
 import docx
 import uuid
 import time
-from google.genai.errors import ClientError
 
 # --- 1. INITIAL CONFIGURATION ---
+# Use Streamlit Secrets: GOOGLE_API_KEY
 if "GOOGLE_API_KEY" in st.secrets:
     client = genai.Client(
         api_key=st.secrets["GOOGLE_API_KEY"],
@@ -87,30 +87,33 @@ if prompt := st.chat_input("Ask a question..."):
 
     with st.chat_message("assistant"):
         doc_text = extract_text(uploaded_files) if uploaded_files else ""
-        full_prompt = f"Context: {doc_text[:20000]}\n\nQuestion: {prompt}\n\nAnswer concisely. Use general knowledge if context is empty."
+        
+        # DEFINING THE PROMPT CORRECTLY
+        full_content = (
+            f"Context from documents: {doc_text[:25000]}\n\n"
+            f"Question: {prompt}\n\n"
+            f"Answer concisely. If the context is empty, use your general knowledge."
+        )
 
-        # Implementation of Exponential Backoff for 429 Errors
         max_retries = 3
-        retry_delay = 5 # seconds
-        success = False
+        retry_delay = 5 
 
         for i in range(max_retries):
             try:
-                # Using 2.5-flash-lite for higher free-tier limits
+                # Using latest Gemini 3 Flash for performance
                 response = client.models.generate_content(
-                    model="gemini-2.5-flash-lite", 
+                    model="gemini-3-flash-preview", 
                     contents=full_content
                 )
                 answer = response.text
                 st.markdown(answer)
                 active_chat["messages"].append({"role": "assistant", "content": answer})
-                success = True
                 break
             except Exception as e:
                 if "429" in str(e) and i < max_retries - 1:
-                    st.warning(f"Quota busy. Retrying in {retry_delay}s... (Attempt {i+1}/{max_retries})")
+                    st.warning(f"Quota reached. Retrying in {retry_delay}s...")
                     time.sleep(retry_delay)
-                    retry_delay *= 2 # Double the wait time
+                    retry_delay *= 2
                 else:
                     st.error(f"Assistant Error: {e}")
                     break
