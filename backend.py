@@ -1,4 +1,4 @@
-import sqlite3
+ import sqlite3
 import os
 import streamlit as st
 from dotenv import load_dotenv
@@ -10,11 +10,11 @@ load_dotenv()
 
 class DatabaseManager:
     def __init__(self, db_path="chat_history.db"):
+        # Using check_same_thread=False is correct for Streamlit's multi-threaded nature
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.create_table()
 
     def create_table(self):
-        # Added session_id to separate different users
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,28 +44,22 @@ class ChatBackend:
     def __init__(self):
         api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not api_key:
-            st.error("API Key not found!")
+            st.error("API Key not found! Please set GOOGLE_API_KEY in .env or secrets.")
             st.stop()
         
-        # Upgraded to Gemini 2.5 Flash for 2026 stability
+        # Use a verified model name like 'gemini-1.5-flash' or 'gemini-2.0-flash-exp'
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash", 
+            model="gemini-1.5-flash", 
             google_api_key=api_key,
             streaming=True,
             temperature=0,
-            api_version="v1",
-            safety_settings={
-                "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
-                "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
-                "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
-                "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
-            }
         )
         self.db = DatabaseManager()
+        # Load documents on initialization
         self.knowledge_base = self._load_backend_documents("documents")
 
     def _load_backend_documents(self, folder_path):
-        combined_text = ""
+        combined_text = []
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
             return ""
@@ -77,28 +71,35 @@ class ChatBackend:
                     reader = PdfReader(file_path)
                     for page in reader.pages:
                         text = page.extract_text()
-                        if text: combined_text += text + " "
+                        if text: combined_text.append(text)
                 elif filename.endswith(".txt"):
                     with open(file_path, "r", encoding="utf-8") as f:
-                        combined_text += f.read() + " "
+                        combined_text.append(f.read())
             except Exception as e:
-                st.error(f"Error reading {filename}: {e}")
+                st.warning(f"Skipped {filename} due to error: {e}")
         
-        return " ".join(combined_text.split())[:15000]
+        # Join list into a single string
+        final_text = "\n".join(combined_text)
+        # Gemini handles large context well; 30k-50k chars is usually safe for basic prompts
+        return final_text[:50000] 
 
     def get_streaming_response(self, user_input, session_id):
-        # Retrieve history ONLY for this specific session
         raw_history = self.db.get_session_history(session_id)
         
-        context_prompt = f"INTERNAL DOCUMENTS CONTEXT:\n{self.knowledge_base}\n\n"
-        
+        # System prompt defines the persona and provides the "Knowledge Base"
         messages = [
-            SystemMessage(content="You are a professional assistant. Use the context to answer accurately.")
+            SystemMessage(content=(
+                "You are a professional assistant. "
+                "Below is the content of internal documents. Use this as your primary source of truth:\n\n"
+                f"{self.knowledge_base}"
+            ))
         ]
         
-        # Add the last 5 private messages from this specific user
+        # Add historical context (sliding window of last 5 messages)
         for role, content in raw_history[-5:]:
             messages.append(HumanMessage(content=content) if role == "user" else AIMessage(content=content))
         
-        messages.append(HumanMessage(content=f"{context_prompt}USER QUESTION: {user_input}"))
+        # Add the current user question
+        messages.append(HumanMessage(content=user_input))
+        
         return self.llm.stream(messages)
