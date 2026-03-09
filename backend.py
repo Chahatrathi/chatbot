@@ -39,17 +39,17 @@ class ChatBackend:
         api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
         
         if not api_key:
-            st.error("API Key not found! Please check your Secrets or .env file.")
+            st.error("API Key not found! Check your Secrets or .env file.")
             st.stop()
         
-        # FINAL FIX: Provide api_version ONLY ONCE as a direct argument.
-        # This prevents the pydantic_core.ValidationError (duplicate value error).
+        # UPGRADE: Using 'gemini-2.5-flash', the current stable 2026 workhorse.
+        # This fixes the 404 because gemini-1.5 has been retired.
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash", 
+            model="gemini-2.5-flash", 
             google_api_key=api_key,
             streaming=True,
             temperature=0,
-            api_version="v1",  
+            api_version="v1",
             safety_settings={
                 "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
                 "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
@@ -80,24 +80,16 @@ class ChatBackend:
             except Exception as e:
                 st.error(f"Error reading {filename}: {e}")
         
-        # Clean text and limit size to ensure stability
         cleaned_text = " ".join(combined_text.split())
         return cleaned_text[:15000]
 
     def get_streaming_response(self, user_input):
         raw_history = self.db.get_all_history()
-        
-        # We wrap the context inside the human message for maximum safety-filter bypass
         context_prompt = f"INTERNAL DOCUMENTS CONTEXT:\n{self.knowledge_base}\n\n"
-        
         messages = [
-            SystemMessage(content="You are a helpful assistant. Use the provided context to answer questions.")
+            SystemMessage(content="You are a helpful assistant. Use the provided context.")
         ]
-        
-        # Include last 3 exchanges for context memory
         for role, content in raw_history[-3:]:
             messages.append(HumanMessage(content=content) if role == "user" else AIMessage(content=content))
-        
         messages.append(HumanMessage(content=f"{context_prompt}USER QUESTION: {user_input}"))
-        
         return self.llm.stream(messages)
