@@ -8,154 +8,102 @@ from google.genai import errors
 from pypdf import PdfReader
 from dotenv import load_dotenv
 
-# Load local .env file if it exists
 load_dotenv()
 
-# --- 1. INITIAL CONFIGURATION ---
-st.set_page_config(page_title="AI Research Assistant", layout="wide", page_icon="🤖")
+# --- 1. SETTINGS & RE-INITIALIZATION ---
+st.set_page_config(page_title="AI Research Assistant", layout="wide")
 
-# API Key Retrieval
-api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
+# This ensures that if you change the key in the UI or secrets, the client updates
+def get_client():
+    api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        st.error("🔑 API Key missing! Add it to .env or Streamlit Secrets.")
+        st.stop()
+    return genai.Client(api_key=api_key)
 
-if not api_key:
-    st.error("🔑 API Key not found! Add it to Streamlit Secrets or a .env file.")
-    st.stop()
+client = get_client()
 
-client = genai.Client(api_key=api_key)
+# --- 2. DOCUMENT UTILITIES ---
 
-# --- 2. DOCUMENT PROCESSING ---
-
-@st.cache_data(show_spinner="Analyzing documents...")
+@st.cache_data(show_spinner=False)
 def extract_text(file_source, is_path=False):
-    """Extracts text from PDF, DOCX, or TXT."""
     try:
-        name = file_source if is_path else file_source.name
-        ext = os.path.splitext(name)[-1].lower()
-        text = ""
-
+        ext = os.path.splitext(file_source if is_path else file_source.name)[-1].lower()
         if ext == ".pdf":
-            reader = PdfReader(file_source)
-            text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
+            return "\n".join([p.extract_text() for p in PdfReader(file_source).pages if p.extract_text()])
         elif ext == ".docx":
-            doc = docx.Document(file_source)
-            text = "\n".join([p.text for p in doc.paragraphs])
+            return "\n".join([p.text for p in docx.Document(file_source).paragraphs])
         elif ext == ".txt":
             if is_path:
-                with open(file_source, "r", encoding="utf-8", errors="ignore") as f:
-                    text = f.read()
-            else:
-                text = file_source.getvalue().decode("utf-8", errors="ignore")
-        return text
-    except Exception as e:
-        return f"Error reading {name}: {str(e)}"
+                with open(file_source, "r", encoding="utf-8", errors="ignore") as f: return f.read()
+            return file_source.getvalue().decode("utf-8", errors="ignore")
+    except: return ""
+    return ""
 
-def get_context_from_folder(folder="documents"):
-    """Reads all files in the documents/ folder."""
+def load_all_context(uploads):
     context = ""
-    if os.path.exists(folder):
-        for filename in os.listdir(folder):
-            path = os.path.join(folder, filename)
-            if os.path.isfile(path):
-                context += extract_text(path, is_path=True) + "\n"
-    return context
+    # 1. Load from documents folder
+    if os.path.exists("documents"):
+        for f in os.listdir("documents"):
+            context += extract_text(os.path.join("documents", f), is_path=True) + "\n"
+    # 2. Load from manual uploads
+    if uploads:
+        for f in uploads: context += extract_text(f) + "\n"
+    
+    # CRITICAL: Free tier has a low "Input Tokens Per Minute" limit.
+    # We limit this to ~10,000 characters to prevent 429 errors.
+    return context[:10000] 
 
-# --- 3. ERROR HANDLING & RETRY LOGIC ---
+# --- 3. THE CHAT ENGINE (With Smart Retry) ---
 
-def generate_response_with_retry(prompt, retries=3, delay=5):
-    """Handles 429 errors by waiting and retrying."""
-    for i in range(retries):
+def ask_gemini(prompt):
+    # If the first attempt fails, we wait and retry with a cleaner state
+    for attempt in range(3):
         try:
             return client.models.generate_content_stream(
                 model="gemini-2.0-flash",
                 contents=prompt
             )
-        except errors.ClientError as e:
-            if "429" in str(e):
-                if i < retries - 1:
-                    st.warning(f"Quota reached. Retrying in {delay}s... (Attempt {i+1}/{retries})")
-                    time.sleep(delay)
-                    delay *= 2  # Exponential backoff
-                    continue
+        except Exception as e:
+            if "429" in str(e) and attempt < 2:
+                time.sleep(attempt * 5 + 5) # Wait 5s, then 10s
+                continue
             raise e
 
-# --- 4. SESSION MANAGEMENT ---
-if "all_chats" not in st.session_state:
-    cid = str(uuid.uuid4())
-    st.session_state.all_chats = {cid: {"name": "New Chat", "messages": []}}
-    st.session_state.current_chat_id = cid
+# --- 4. SESSION & UI ---
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-def start_new_chat():
-    cid = str(uuid.uuid4())
-    st.session_state.all_chats[cid] = {"name": "New Chat", "messages": []}
-    st.session_state.current_chat_id = cid
-    st.rerun()
-
-# --- 5. UI & SIDEBAR ---
 with st.sidebar:
-    st.title("Settings")
-    if st.button("➕ New Chat", use_container_width=True):
-        start_new_chat()
-    
-    chat_ids = list(st.session_state.all_chats.keys())
-    selected_id = st.selectbox(
-        "History", 
-        options=chat_ids, 
-        format_func=lambda x: st.session_state.all_chats[x]["name"],
-        index=chat_ids.index(st.session_state.current_chat_id)
-    )
-    st.session_state.current_chat_id = selected_id
-    
+    st.title("Assistant Control")
+    if st.button("🗑️ Clear Chat & Cache"):
+        st.session_state.messages = []
+        st.cache_data.clear()
+        st.rerun()
     st.divider()
-    uploads = st.file_uploader("Upload Files", type=["pdf", "txt", "docx"], accept_multiple_files=True)
+    uploads = st.file_uploader("Upload more data", type=["pdf", "txt", "docx"], accept_multiple_files=True)
 
-# --- 6. CHAT INTERFACE ---
 st.title("🤖 Assistant Research Chatbot")
-active_chat = st.session_state.all_chats[st.session_state.current_chat_id]
 
 # Display history
-for msg in active_chat["messages"]:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+for m in st.session_state.messages:
+    with st.chat_message(m["role"]): st.markdown(m["content"])
 
-# User prompt
-if user_input := st.chat_input("Ask a question about your data..."):
-    # Update chat name if first message
-    if not active_chat["messages"]:
-        active_chat["name"] = user_input[:30] + "..."
-
-    active_chat["messages"].append({"role": "user", "content": user_input})
-    with st.chat_message("user"):
-        st.markdown(user_input)
+if prompt := st.chat_input("Ask a question..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"): st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        # Compile Context
-        context = get_context_from_folder()
-        if uploads:
-            for f in uploads:
-                context += extract_text(f) + "\n"
+        context = load_all_context(uploads)
+        full_query = f"Context: {context}\n\nUser Question: {prompt}\nAnswer using the context above."
         
-        # Limit context to keep within free-tier token limits (approx 30k chars)
-        context = context[:30000]
-        
-        full_prompt = (
-            f"SYSTEM: Use the following context to answer precisely. If not found, use general knowledge.\n"
-            f"CONTEXT:\n{context}\n\n"
-            f"USER QUESTION: {user_input}"
-        )
-
         try:
             placeholder = st.empty()
-            full_response = ""
-            
-            # Use retry-wrapped streaming
-            stream = generate_response_with_retry(full_prompt)
-            
-            for chunk in stream:
-                full_response += chunk.text
-                placeholder.markdown(full_response + "▌")
-            
-            placeholder.markdown(full_response)
-            active_chat["messages"].append({"role": "assistant", "content": full_response})
-            
+            full_res = ""
+            for chunk in ask_gemini(full_query):
+                full_res += chunk.text
+                placeholder.markdown(full_res + "▌")
+            placeholder.markdown(full_res)
+            st.session_state.messages.append({"role": "assistant", "content": full_res})
         except Exception as e:
-            st.error(f"Failed after retries: {e}")
+            st.error(f"Error: {e}. Try the 'Clear Chat & Cache' button.")
