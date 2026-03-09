@@ -16,7 +16,7 @@ else:
     st.error("Please add GOOGLE_API_KEY to your Streamlit Secrets.")
     st.stop()
 
-# --- 2. SESSION MANAGEMENT (History) ---
+# --- 2. SESSION MANAGEMENT ---
 if "all_chats" not in st.session_state:
     initial_id = str(uuid.uuid4())
     st.session_state.all_chats = {
@@ -72,12 +72,10 @@ with st.sidebar:
 # --- 5. CHAT LOGIC ---
 active_chat = st.session_state.all_chats[st.session_state.current_chat_id]
 
-# Display history
 for msg in active_chat["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# User Input
 if prompt := st.chat_input("Ask a question..."):
     if not active_chat["messages"]:
         active_chat["name"] = prompt[:30] + "..."
@@ -89,34 +87,15 @@ if prompt := st.chat_input("Ask a question..."):
     with st.chat_message("assistant"):
         doc_text = extract_text(uploaded_files) if uploaded_files else ""
         
-        # PROMPT LOGIC: Primary context from backend files, Fallback to General Knowledge
         full_content = (
-            f"SYSTEM: You are a professional research assistant. \n"
-            f"BACKEND CONTEXT: {doc_text[:25000]}\n\n"
-            f"USER QUESTION: {prompt}\n\n"
-            f"INSTRUCTIONS: Use the backend context to answer. If the answer is not in the context, "
-            f"use your internal knowledge to provide a helpful, accurate response. Do not say you lack context."
+            f"SYSTEM: Use the context below to answer. If no context exists, use general knowledge.\n"
+            f"CONTEXT: {doc_text[:20000]}\n\n"
+            f"QUESTION: {prompt}"
         )
 
-        max_retries = 3
-        retry_delay = 5 
-
-        for i in range(max_retries):
+        # Retry logic for 429 Resource Exhausted
+        success = False
+        for attempt in range(3):
             try:
-                # Using gemini-2.0-flash for maximum stability
-                response = client.models.generate_content(
-                    model="gemini-2.0-flash", 
-                    contents=full_content
-                )
-                answer = response.text
-                st.markdown(answer)
-                active_chat["messages"].append({"role": "assistant", "content": answer})
-                break
-            except Exception as e:
-                if "429" in str(e) and i < max_retries - 1:
-                    st.warning(f"Quota busy. Retrying in {retry_delay}s...")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2
-                else:
-                    st.error(f"Assistant Error: {e}")
-                    break
+                # Using 2.5-flash-lite for better free-tier request limits
+                response
