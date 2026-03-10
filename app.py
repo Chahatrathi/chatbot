@@ -9,6 +9,7 @@ from google.genai import errors
 from pypdf import PdfReader
 from dotenv import load_dotenv
 
+# Modern LangChain imports
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -48,10 +49,10 @@ class DatabaseManager:
 
     def migrate_schema(self):
         cursor = self.conn.execute("PRAGMA table_info(messages)")
-        cols = [c[1] for c in cursor.fetchall()]
-        if "prompt_tokens" not in cols:
+        columns = [column[1] for column in cursor.fetchall()]
+        if "prompt_tokens" not in columns:
             self.conn.execute("ALTER TABLE messages ADD COLUMN prompt_tokens INTEGER DEFAULT 0")
-        if "completion_tokens" not in cols:
+        if "completion_tokens" not in columns:
             self.conn.execute("ALTER TABLE messages ADD COLUMN completion_tokens INTEGER DEFAULT 0")
         self.conn.commit()
 
@@ -73,11 +74,11 @@ class DatabaseManager:
 
 db = DatabaseManager()
 
-# --- 3. VECTOR MANAGER (Reduced Chunk Size) ---
+# --- 3. VECTOR MANAGER (REDUCED CHUNKING) ---
 class VectorManager:
     def __init__(self):
         self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        # REDUCED CHUNK SIZE: 500 characters for better token management
+        # REDUCED CHUNK SIZE to 500 for better token management
         self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 
     def build_index(self, uploads):
@@ -102,24 +103,27 @@ class VectorManager:
 
 vm = VectorManager()
 
-# --- 4. SIDEBAR ---
+# --- 4. SIDEBAR DASHBOARD ---
 if "current_chat_id" not in st.session_state:
     st.session_state.current_chat_id = str(uuid.uuid4())
 
 with st.sidebar:
-    st.title("📊 Usage Tracker")
+    st.title("📊 Usage Dashboard")
     p_sum, c_sum, msg_count = db.get_total_usage()
-    st.metric("Total Input Tokens", f"{p_sum:,}")
-    st.metric("Total Output Tokens", f"{c_sum:,}")
     
-    daily_limit = 1500
+    col1, col2 = st.columns(2)
+    col1.metric("Input Tokens", f"{p_sum:,}")
+    col2.metric("Output Tokens", f"{c_sum:,}")
+    
+    daily_limit = 1000 # RPD for 2.5 Flash Lite
     remaining = max(0, daily_limit - msg_count)
     st.progress(remaining / daily_limit, text=f"Daily Quota: {remaining}/{daily_limit} left")
     
-    if st.button("➕ New Chat"):
+    st.divider()
+    if st.button("➕ New Chat", use_container_width=True):
         st.session_state.current_chat_id = str(uuid.uuid4()); st.rerun()
 
-    uploads = st.file_uploader("Upload Files", type=["pdf", "txt", "docx"], accept_multiple_files=True)
+    uploads = st.file_uploader("Knowledge Base", type=["pdf", "txt", "docx"], accept_multiple_files=True)
 
 # --- 5. MAIN CHAT ---
 st.title("🤖 AI Research Assistant")
@@ -136,24 +140,23 @@ if user_input:
     with st.chat_message("assistant"):
         placeholder = st.empty()
         
-        with st.spinner("Searching documents..."):
+        # SEARCH FOR CONTEXT (MANDATORY RAG)
+        with st.spinner("Retrieving relevant facts..."):
             vector_db = vm.build_index(uploads)
             context = ""
             if vector_db:
-                # STRICTOR RAG: Only Top 3 chunks
+                # Retrieve only top 3 small chunks
                 docs = vector_db.similarity_search(user_input, k=3)
                 context = "\n\n".join([d.page_content for d in docs])
     
-        full_prompt = f"CONTEXT:\n{context}\n\nQUESTION: {user_input}"
+        full_prompt = f"Use this CONTEXT to answer the question briefly:\n{context}\n\nQUESTION: {user_input}"
         
-        # --- ROBUST API CALL WITH BACKOFF ---
-        full_res = ""
+        # API CALL WITH RETRY LOGIC
         success = False
         for attempt in range(3):
             try:
-                # Using 2.0-flash-lite for higher free tier limits
                 response = client.models.generate_content(
-                    model="gemini-2.0-flash-lite",
+                    model="gemini-2.5-flash-lite",
                     contents=full_prompt
                 )
                 
@@ -161,21 +164,22 @@ if user_input:
                 placeholder.markdown(full_res)
                 
                 db.save_message(
-                    st.session_state.current_chat_id, "assistant", full_res,
+                    st.session_state.current_chat_id, 
+                    "assistant", 
+                    full_res,
                     p_tokens=response.usage_metadata.prompt_token_count,
                     c_tokens=response.usage_metadata.candidates_token_count
                 )
                 success = True
                 break
                 
-            except Exception as e:
-                if "429" in str(e):
-                    wait_time = 45 if attempt == 0 else 60
-                    placeholder.warning(f"Quota exceeded. Sleeping {wait_time}s to reset...")
-                    time.sleep(wait_time)
+            except errors.ClientError as ce:
+                if "429" in str(ce):
+                    placeholder.warning(f"Rate limit hit. Retrying in 30s... (Attempt {attempt+1}/3)")
+                    time.sleep(30)
                 else:
-                    st.error(f"Error: {e}")
+                    st.error(f"API Error: {ce}")
                     break
-        
+
         if success:
             st.rerun()
