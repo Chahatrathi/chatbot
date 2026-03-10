@@ -98,7 +98,74 @@ with st.sidebar:
         st.download_button("📥 Download Current Chat", data=chat_text, file_name=f"chat_{st.session_state.current_chat_id[:8]}.txt")
 
 # --- 6. CHAT LOGIC ---
-st.title("🤖 Assistant Research Chatbot")
+st.title("🤖 Assistant Chatbot")
+
+# Display Messages from DB
+history = db.get_history(st.session_state.current_chat_id)
+for role, content in history:
+    with st.chat_message(role):
+        st.markdown(content)
+
+if user_input := st.chat_input("Ask a question..."):
+    # 1. Save User Message
+    db.save_message(st.session_state.current_chat_id, "user", user_input)
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    # 2. Assistant Response
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        full_res = ""
+        
+        # Compile Context from local 'documents' folder and sidebar uploads
+        context = ""
+        if os.path.exists("documents"):
+            for f in os.listdir("documents"):
+                file_path = os.path.join("documents", f)
+                if os.path.isfile(file_path):
+                    context += extract_text(file_path, is_path=True) + "\n"
+        
+        if uploads:
+            for f in uploads:
+                context += extract_text(f) + "\n"
+
+        # 3. Enhanced Prompt Logic
+        # This tells the AI to use documents if available, otherwise use general knowledge.
+        system_instructions = (
+            "You are a professional research assistant. "
+            "1. If the user's question can be answered using the provided CONTEXT, prioritize that information. "
+            "2. If the CONTEXT is empty or does not contain the answer, use your general knowledge to provide a helpful, accurate response. "
+            "3. Always maintain a professional tone."
+        )
+        
+        prompt_with_context = (
+            f"{system_instructions}\n\n"
+            f"CONTEXT FROM DOCUMENTS:\n{context if context else 'No documents provided.'}\n\n"
+            f"USER QUESTION: {user_input}"
+        )
+
+        try:
+            # We use gemini-2.0-flash for speed and reliability
+            response = client.models.generate_content_stream(
+                model="gemini-2.0-flash",
+                contents=prompt_with_context
+            )
+            
+            for chunk in response:
+                if chunk.text:
+                    full_res += chunk.text
+                    placeholder.markdown(full_res + "▌")
+            
+            placeholder.markdown(full_res)
+            
+            # 4. Save Assistant Message to DB
+            db.save_message(st.session_state.current_chat_id, "assistant", full_res)
+            
+        except Exception as e:
+            if "429" in str(e):
+                st.error("Quota reached (429). Please wait about 30-60 seconds before asking again.")
+            else:
+                st.error(f"Execution Error: {e}")
 
 # Display Messages from DB
 for role, content in db.get_history(st.session_state.current_chat_id):
