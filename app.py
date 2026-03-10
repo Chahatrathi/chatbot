@@ -13,17 +13,16 @@ load_dotenv()
 # --- 1. INITIAL CONFIGURATION ---
 st.set_page_config(page_title="AI Research Assistant", layout="wide", page_icon="🤖")
 
-# Initialize Client with stable 2026 settings
 def get_client():
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
         st.error("🔑 API Key missing! Add it to .env or Streamlit Secrets.")
         st.stop()
-    return genai.Client(api_key=api_key, http_options={'api_version': 'v1'})
+    return genai.Client(api_key=api_key)
 
 client = get_client()
 
-# --- 2. DATABASE MANAGER (For History & Downloads) ---
+# --- 2. DATABASE MANAGER ---
 class DatabaseManager:
     def __init__(self, db_path="chat_history.db"):
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -57,7 +56,7 @@ class DatabaseManager:
 
 db = DatabaseManager()
 
-# --- 3. DOCUMENT EXTRACTION ---
+# --- 3. DATA EXTRACTION ---
 @st.cache_data(show_spinner=False)
 def extract_text(file_source, is_path=False):
     try:
@@ -82,73 +81,64 @@ def start_new_chat():
     st.session_state.current_chat_id = str(uuid.uuid4())
     st.rerun()
 
-# --- 5. SIDEBAR & UI ---
+# --- 5. SIDEBAR ---
 with st.sidebar:
-    st.title("Settings")
+    st.title("Research Settings")
     if st.button("➕ Start New Chat", use_container_width=True):
         start_new_chat()
     
     st.divider()
     uploads = st.file_uploader("Knowledge Base", type=["pdf", "txt", "docx"], accept_multiple_files=True)
     
-    # Feature: Download History
-    history = db.get_history(st.session_state.current_chat_id)
-    if history:
-        chat_text = "\n".join([f"{r.upper()}: {c}" for r, c in history])
-        st.download_button("📥 Download Current Chat", data=chat_text, file_name=f"chat_{st.session_state.current_chat_id[:8]}.txt")
+    history_data = db.get_history(st.session_state.current_chat_id)
+    if history_data:
+        chat_text = "\n".join([f"{r.upper()}: {c}" for r, c in history_data])
+        st.download_button("📥 Download This Chat", data=chat_text, file_name=f"chat_{st.session_state.current_chat_id[:8]}.txt")
 
-# --- 6. CHAT LOGIC ---
-st.title("🤖 Assistant Chatbot")
+# --- 6. MAIN INTERFACE ---
+st.title("🤖 Assistant Research Chatbot")
 
-# Display Messages from DB
-history = db.get_history(st.session_state.current_chat_id)
-for role, content in history:
+# Display Messages
+for role, content in db.get_history(st.session_state.current_chat_id):
     with st.chat_message(role):
         st.markdown(content)
 
-if user_input := st.chat_input("Ask a question..."):
-    # 1. Save User Message
+# CHAT INPUT (Placed outside of any conditional loops to avoid Duplicate ID error)
+user_input = st.chat_input("Ask a question...")
+
+if user_input:
+    # Save User Message
     db.save_message(st.session_state.current_chat_id, "user", user_input)
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # 2. Assistant Response
+    # Generate Response
     with st.chat_message("assistant"):
         placeholder = st.empty()
         full_res = ""
         
-        # Compile Context from local 'documents' folder and sidebar uploads
+        # Compile Context
         context = ""
         if os.path.exists("documents"):
             for f in os.listdir("documents"):
-                file_path = os.path.join("documents", f)
-                if os.path.isfile(file_path):
-                    context += extract_text(file_path, is_path=True) + "\n"
-        
+                context += extract_text(os.path.join("documents", f), is_path=True) + "\n"
         if uploads:
             for f in uploads:
                 context += extract_text(f) + "\n"
 
-        # 3. Enhanced Prompt Logic
-        # This tells the AI to use documents if available, otherwise use general knowledge.
-        system_instructions = (
-            "You are a professional research assistant. "
-            "1. If the user's question can be answered using the provided CONTEXT, prioritize that information. "
-            "2. If the CONTEXT is empty or does not contain the answer, use your general knowledge to provide a helpful, accurate response. "
-            "3. Always maintain a professional tone."
-        )
-        
-        prompt_with_context = (
-            f"{system_instructions}\n\n"
-            f"CONTEXT FROM DOCUMENTS:\n{context if context else 'No documents provided.'}\n\n"
-            f"USER QUESTION: {user_input}"
+        # System Instructions for General Knowledge Fallback
+        prompt_template = (
+            "You are a helpful research assistant.\n"
+            "INSTRUCTION: Use the provided CONTEXT to answer. If the context is missing or irrelevant, "
+            "provide a high-quality answer using your general knowledge.\n\n"
+            f"CONTEXT:\n{context[:30000] if context else 'None provided.'}\n\n"
+            f"QUESTION: {user_input}"
         )
 
         try:
-            # We use gemini-2.0-flash for speed and reliability
             response = client.models.generate_content_stream(
                 model="gemini-2.0-flash",
-                contents=prompt_with_context
+                contents=prompt_template
             )
             
             for chunk in response:
@@ -157,23 +147,10 @@ if user_input := st.chat_input("Ask a question..."):
                     placeholder.markdown(full_res + "▌")
             
             placeholder.markdown(full_res)
-            
-            # 4. Save Assistant Message to DB
             db.save_message(st.session_state.current_chat_id, "assistant", full_res)
             
         except Exception as e:
             if "429" in str(e):
-                st.error("Quota reached (429). Please wait about 30-60 seconds before asking again.")
+                st.error("Rate limit hit. Please wait a moment.")
             else:
-                st.error(f"Execution Error: {e}")
-
-# Display Messages from DB
-for role, content in db.get_history(st.session_state.current_chat_id):
-    with st.chat_message(role):
-        st.markdown(content)
-
-if user_input := st.chat_input("Ask a question..."):
-    # 1. Save User Message
-    db.save_message(st.session_state.current_chat_id, "user", user_input)
-    with st.chat_message("user"):
-        st.markdown(user_input)
+                st.error(f"Error: {e}")
