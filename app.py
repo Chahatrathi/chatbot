@@ -96,7 +96,7 @@ with st.sidebar:
         st.download_button("📥 Download This Chat", data=chat_text, file_name=f"chat_{st.session_state.current_chat_id[:8]}.txt")
 
 # --- 6. MAIN INTERFACE ---
-st.title("🤖 Assistant ")
+st.title("🤖 Assistant Research Chatbot")
 
 # Display Messages
 for role, content in db.get_history(st.session_state.current_chat_id):
