@@ -1,14 +1,11 @@
-streamlit
-langchain
-langchain-community
-langchain-google-genai
-langchain-core
-google-generativeai>=0.5.0
-PyPDF2
+ streamlit
 python-dotenv
-python-docx
+docx2txt
 pypdf
 google-genai
-faiss-cpu
+langchain
+langchain-community
 langchain-huggingface
 langchain-text-splitters
+faiss-cpu
+sentence-transformers
