@@ -2,33 +2,42 @@ import streamlit as st
 import os
 import sqlite3
 import uuid
-import docx
 import time
+import docx2txt
 from google import genai
-from google.api_core import exceptions
+from google.genai import errors
 from pypdf import PdfReader
 from dotenv import load_dotenv
 
-# Modern LangChain imports for 2026
+# Modern LangChain imports
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
 
-# --- 1. CONFIGURATION ---
+# --- 1. CONFIGURATION & CLIENT FIX ---
 st.set_page_config(page_title="AI Research Assistant", layout="wide", page_icon="🤖")
 
 def get_client():
+    # Priority: Streamlit Secrets -> .env file
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    
     if not api_key:
-        st.error("🔑 API Key missing! Check Streamlit Secrets.")
+        st.error("🔑 API Key missing! Add it to App Settings > Secrets.")
         st.stop()
-    return genai.Client(api_key=api_key)
+        
+    try:
+        # vertexai=False is the SPECIFIC fix for the ClientError
+        # it forces the SDK to use the standard API Studio key path
+        return genai.Client(api_key=api_key, vertexai=False)
+    except Exception as e:
+        st.error(f"Failed to initialize Gemini Client: {e}")
+        st.stop()
 
 client = get_client()
 
-# --- 2. DATABASE (Chat History) ---
+# --- 2. DATABASE MANAGER ---
 class DatabaseManager:
     def __init__(self, db_path="chat_history.db"):
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -58,45 +67,34 @@ class DatabaseManager:
 
 db = DatabaseManager()
 
-# --- 3. VECTOR MANAGER (The 429 & Token Solution) ---
+# --- 3. VECTOR MANAGER (Optimizes Context) ---
 class VectorManager:
     def __init__(self):
-        # We use a local model for embeddings to save your Google API Quota
+        # Local model: Saves API quota for actual chat
         self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
-    def build_index(self, uploads, local_folder="documents"):
+    def build_index(self, uploads):
         texts = []
-        # 1. Read local documents folder
-        if os.path.exists(local_folder):
-            for f in os.listdir(local_folder):
-                texts.append(self._extract(os.path.join(local_folder, f), is_path=True))
-        # 2. Read user uploads
         if uploads:
             for f in uploads:
-                texts.append(self._extract(f))
+                name = f.name
+                ext = os.path.splitext(name)[-1].lower()
+                try:
+                    if ext == ".pdf":
+                        texts.append("\n".join([p.extract_text() for p in PdfReader(f).pages if p.extract_text()]))
+                    elif ext == ".docx":
+                        texts.append(docx2txt.process(f))
+                    elif ext == ".txt":
+                        texts.append(f.getvalue().decode("utf-8", errors="ignore"))
+                except Exception as e:
+                    st.warning(f"Error reading {name}: {e}")
         
         combined = "\n".join(filter(None, texts))
         if not combined.strip(): return None
 
-        # 3. Chunk and Store
         chunks = self.text_splitter.split_text(combined)
         return FAISS.from_texts(chunks, self.embeddings)
-
-    def _extract(self, source, is_path=False):
-        try:
-            name = source if is_path else source.name
-            ext = os.path.splitext(name)[-1].lower()
-            if ext == ".pdf":
-                return "\n".join([p.extract_text() for p in PdfReader(source).pages if p.extract_text()])
-            elif ext == ".docx":
-                import docx2txt
-                return docx2txt.process(source)
-            elif ext == ".txt":
-                if is_path:
-                    with open(source, "r", encoding="utf-8", errors="ignore") as f: return f.read()
-                return source.getvalue().decode("utf-8", errors="ignore")
-        except: return ""
 
 vm = VectorManager()
 
@@ -105,17 +103,15 @@ if "current_chat_id" not in st.session_state:
     st.session_state.current_chat_id = str(uuid.uuid4())
 
 with st.sidebar:
-    st.title("Settings")
-    if st.button("➕ New Chat"):
-        st.session_state.current_chat_id = str(uuid.uuid4())
-        st.rerun()
+    st.title("Research Control")
+    if st.button("➕ Start New Chat", use_container_width=True):
+        st.session_state.current_chat_id = str(uuid.uuid4()); st.rerun()
     
     sessions = db.get_all_sessions()
     if sessions:
         selected = st.selectbox("Chat History", sessions)
         if selected != st.session_state.current_chat_id:
-            st.session_state.current_chat_id = selected
-            st.rerun()
+            st.session_state.current_chat_id = selected; st.rerun()
 
     uploads = st.file_uploader("Upload Documents", type=["pdf", "txt", "docx"], accept_multiple_files=True)
 
@@ -135,7 +131,7 @@ if user_input:
     with st.chat_message("assistant"):
         placeholder = st.empty()
         
-        # 1. Search for context (Prevents sending massive text to API)
+        # 1. Search for context
         with st.spinner("Searching documents..."):
             vector_db = vm.build_index(uploads)
             context = ""
@@ -143,14 +139,17 @@ if user_input:
                 docs = vector_db.similarity_search(user_input, k=3)
                 context = "\n\n".join([d.page_content for d in docs])
 
-        # 2. Call Gemini with Retry Logic (Handles 429 Errors)
+        # 2. Call Gemini with Retry & Explicit Error Handling
         full_res = ""
         success = False
+        # Switch to flash-lite if hitting 429 often
+        model_name = "gemini-2.0-flash" 
+
         for attempt in range(3):
             try:
-                prompt = f"Use this CONTEXT to answer:\n{context}\n\nUSER QUESTION: {user_input}"
+                prompt = f"CONTEXT:\n{context}\n\nQUESTION: {user_input}"
                 response = client.models.generate_content_stream(
-                    model="gemini-2.0-flash",
+                    model=model_name,
                     contents=prompt
                 )
                 for chunk in response:
@@ -159,13 +158,19 @@ if user_input:
                         placeholder.markdown(full_res + "▌")
                 success = True
                 break 
-            except exceptions.ResourceExhausted:
-                wait_time = (attempt + 1) * 15
-                placeholder.warning(f"Quota exceeded. Retrying in {wait_time}s...")
-                time.sleep(wait_time)
+            except errors.ClientError as ce:
+                # This catches the specific error you saw and explains it
+                st.error(f"API Configuration Error: {ce}")
+                break
+            except Exception as e:
+                if "429" in str(e):
+                    wait_time = (attempt + 1) * 20
+                    placeholder.warning(f"Quota exceeded. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    st.error(f"Unexpected Error: {e}")
+                    break
         
-        if not success:
-            st.error("API is overloaded. Please try again in 1 minute.")
-        else:
+        if success:
             placeholder.markdown(full_res)
             db.save_message(st.session_state.current_chat_id, "assistant", full_res)
