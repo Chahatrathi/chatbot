@@ -2,33 +2,41 @@ import streamlit as st
 import os
 import sqlite3
 import uuid
-import docx
 import time
+import docx2txt
 from google import genai
-from google.api_core import exceptions
+from google.genai import errors
 from pypdf import PdfReader
 from dotenv import load_dotenv
 
-# Corrected Imports for 2026 LangChain structure
+# Modern LangChain imports for 2026
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
 
-# --- 1. INITIAL CONFIGURATION ---
+# --- 1. CONFIGURATION & CLIENT FIX ---
 st.set_page_config(page_title="AI Research Assistant", layout="wide", page_icon="🤖")
 
 def get_client():
+    # Use Streamlit secrets for Cloud, fallback to .env for local
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    
     if not api_key:
-        st.error("🔑 API Key missing! Add it to .env or Streamlit Secrets.")
+        st.error("🔑 API Key missing! Go to App Settings > Secrets and add GOOGLE_API_KEY.")
         st.stop()
-    return genai.Client(api_key=api_key)
+        
+    try:
+        # vertexai=False is the CRITICAL fix for the ClientError
+        return genai.Client(api_key=api_key, vertexai=False)
+    except Exception as e:
+        st.error(f"Failed to initialize Gemini Client: {e}")
+        st.stop()
 
 client = get_client()
 
-# --- 2. DATABASE MANAGER ---
+# --- 2. DATABASE (Chat History) ---
 class DatabaseManager:
     def __init__(self, db_path="chat_history.db"):
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -58,71 +66,69 @@ class DatabaseManager:
 
 db = DatabaseManager()
 
-# --- 3. RAG MANAGER (The 429 Error Solution) ---
+# --- 3. VECTOR MANAGER (The 429 & Token Solution) ---
 class VectorManager:
     def __init__(self):
-        # Local embeddings (saves API quota)
+        # We use a local model for embeddings to save your Google API Quota
         self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
-    def get_vector_store(self, uploads, local_folder="documents"):
+    def build_index(self, uploads, local_folder="documents"):
         texts = []
-        # Process local files
         if os.path.exists(local_folder):
             for f in os.listdir(local_folder):
-                texts.append(extract_text(os.path.join(local_folder, f), is_path=True))
-        # Process uploads
+                texts.append(self._extract(os.path.join(local_folder, f), is_path=True))
         if uploads:
             for f in uploads:
-                texts.append(extract_text(f))
+                texts.append(self._extract(f))
         
-        full_text = "\n".join(filter(None, texts))
-        if not full_text.strip(): return None
+        combined = "\n".join(filter(None, texts))
+        if not combined.strip(): return None
 
-        chunks = self.text_splitter.split_text(full_text)
+        chunks = self.text_splitter.split_text(combined)
         return FAISS.from_texts(chunks, self.embeddings)
+
+    def _extract(self, source, is_path=False):
+        try:
+            name = source if is_path else source.name
+            ext = os.path.splitext(name).lower()[-1]
+            if ext == ".pdf":
+                return "\n".join([p.extract_text() for p in PdfReader(source).pages if p.extract_text()])
+            elif ext == ".docx":
+                return docx2txt.process(source)
+            elif ext == ".txt":
+                if is_path:
+                    with open(source, "r", encoding="utf-8", errors="ignore") as f: return f.read()
+                return source.getvalue().decode("utf-8", errors="ignore")
+        except: return ""
 
 vm = VectorManager()
 
-# --- 4. DATA EXTRACTION ---
-@st.cache_data(show_spinner=False)
-def extract_text(file_source, is_path=False):
-    try:
-        name = file_source if is_path else file_source.name
-        ext = os.path.splitext(name)[-1].lower()
-        if ext == ".pdf":
-            return "\n".join([p.extract_text() for p in PdfReader(file_source).pages if p.extract_text()])
-        elif ext == ".docx":
-            return "\n".join([p.text for p in docx.Document(file_source).paragraphs])
-        elif ext == ".txt":
-            if is_path:
-                with open(file_source, "r", encoding="utf-8", errors="ignore") as f: return f.read()
-            return file_source.getvalue().decode("utf-8", errors="ignore")
-    except: return ""
-
-# --- 5. INTERFACE & LOGIC ---
+# --- 4. STREAMLIT UI ---
 if "current_chat_id" not in st.session_state:
     st.session_state.current_chat_id = str(uuid.uuid4())
 
 with st.sidebar:
-    st.title("Research Control")
-    if st.button("➕ Start New Chat", use_container_width=True):
+    st.title("Settings")
+    if st.button("➕ New Chat"):
         st.session_state.current_chat_id = str(uuid.uuid4()); st.rerun()
     
     sessions = db.get_all_sessions()
     if sessions:
-        selected = st.selectbox("Previous Chats", sessions, index=0)
+        selected = st.selectbox("Chat History", sessions)
         if selected != st.session_state.current_chat_id:
             st.session_state.current_chat_id = selected; st.rerun()
 
-    uploads = st.file_uploader("Knowledge Base", type=["pdf", "txt", "docx"], accept_multiple_files=True)
+    uploads = st.file_uploader("Upload Documents", type=["pdf", "txt", "docx"], accept_multiple_files=True)
 
 st.title("🤖 AI Research Assistant")
 
+# Display Messages
 for role, content in db.get_history(st.session_state.current_chat_id):
     with st.chat_message(role): st.markdown(content)
 
-user_input = st.chat_input("Ask a question...")
+# Input
+user_input = st.chat_input("Ask about your data...")
 
 if user_input:
     db.save_message(st.session_state.current_chat_id, "user", user_input)
@@ -131,20 +137,20 @@ if user_input:
     with st.chat_message("assistant"):
         placeholder = st.empty()
         
-        # 1. Similarity Search (Reduces tokens to avoid 429)
-        vector_db = vm.get_vector_store(uploads)
-        context = ""
-        if vector_db:
-            docs = vector_db.similarity_search(user_input, k=3)
-            context = "\n\n".join([d.page_content for d in docs])
+        # 1. Search for context
+        with st.spinner("Searching documents..."):
+            vector_db = vm.build_index(uploads)
+            context = ""
+            if vector_db:
+                docs = vector_db.similarity_search(user_input, k=3)
+                context = "\n\n".join([d.page_content for d in docs])
 
-        prompt = f"CONTEXT:\n{context}\n\nQUESTION: {user_input}"
-
-        # 2. API Call with Rate Limit Handling
+        # 2. Call Gemini with Robust Retry Logic
         full_res = ""
-        max_retries = 2
-        for i in range(max_retries + 1):
+        success = False
+        for attempt in range(3):
             try:
+                prompt = f"CONTEXT:\n{context}\n\nQUESTION: {user_input}"
                 response = client.models.generate_content_stream(
                     model="gemini-2.0-flash",
                     contents=prompt
@@ -153,13 +159,16 @@ if user_input:
                     if chunk.text:
                         full_res += chunk.text
                         placeholder.markdown(full_res + "▌")
-                break # Success!
-            except exceptions.ResourceExhausted:
-                if i < max_retries:
-                    placeholder.warning(f"Rate limit hit. Retrying in 10s... (Attempt {i+1}/3)")
-                    time.sleep(10)
-                else:
-                    st.error("Quota exhausted. Please wait 1 minute before asking again.")
+                success = True
+                break 
+            except errors.ClientError as ce:
+                st.error(f"Configuration Error: {ce}")
+                break
+            except Exception as e:
+                wait_time = (attempt + 1) * 15
+                placeholder.warning(f"Connection busy. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
         
-        placeholder.markdown(full_res)
-        db.save_message(st.session_state.current_chat_id, "assistant", full_res)
+        if success:
+            placeholder.markdown(full_res)
+            db.save_message(st.session_state.current_chat_id, "assistant", full_res)
