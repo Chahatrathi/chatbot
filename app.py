@@ -120,7 +120,6 @@ if "current_chat_id" not in st.session_state:
 
 with st.sidebar:
     st.title("💬 Chat Controls")
-    # When you click this, I start a brand new session
     if st.button("➕ Start New Chat", use_container_width=True):
         st.session_state.current_chat_id = str(uuid.uuid4())
         st.rerun()
@@ -132,7 +131,6 @@ with st.sidebar:
     
     if session_map:
         session_ids = list(session_map.keys())
-        # If this is a new chat you haven't started yet, I label it accordingly
         if st.session_state.current_chat_id not in session_ids:
             session_ids.insert(0, st.session_state.current_chat_id)
             session_map[st.session_state.current_chat_id] = "New Conversation"
@@ -176,15 +174,22 @@ if user_input:
             vector_db = vm.get_vector_store()
             context = ""
             if vector_db:
-                # I only pick the most relevant snippets to save your tokens
+                # I pick the most relevant snippets to answer you accurately
                 docs = vector_db.similarity_search(user_input, k=3)
                 context = "\n\n".join([d.page_content for d in docs])
     
-        prompt = f"CONTEXT:\n{context}\n\nQUESTION: {user_input}"
+        # I've updated my instructions to speak to you in the 1st person
+        # and avoid robotic "based on the text" phrases.
+        prompt = (
+            "I am your personal research assistant. I will use the following context to answer you "
+            "directly in the first person. I will avoid phrases like 'Based on the provided text' "
+            "and instead provide my insights as your helpful peer.\n\n"
+            f"MY CONTEXT:\n{context}\n\n"
+            f"YOUR QUESTION: {user_input}"
+        )
         
         success = False
         full_res = ""
-        # I will try to reach the API, with a backup plan if it's busy
         for attempt in range(2):
             try:
                 response = client.models.generate_content(
@@ -194,7 +199,6 @@ if user_input:
                 full_res = response.text
                 placeholder.markdown(full_res)
                 
-                # I save my response and track how many tokens I used
                 db.save_message(
                     st.session_state.current_chat_id, 
                     "assistant", 
