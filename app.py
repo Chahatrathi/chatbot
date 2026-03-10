@@ -28,7 +28,7 @@ def get_client():
 
 client = get_client()
 
-# --- 2. DATABASE MANAGER ---
+# --- 2. DATABASE MANAGER (Updated for Titles) ---
 class DatabaseManager:
     def __init__(self, db_path="chat_history.db"):
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -67,9 +67,18 @@ class DatabaseManager:
         cursor = self.conn.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY timestamp ASC", (session_id,))
         return cursor.fetchall()
 
-    def get_all_sessions(self):
-        cursor = self.conn.execute("SELECT DISTINCT session_id FROM messages ORDER BY timestamp DESC")
-        return [row[0] for row in cursor.fetchall()]
+    def get_session_titles(self):
+        """Fetches unique session IDs and the first user message as the title."""
+        cursor = self.conn.execute("""
+            SELECT session_id, content 
+            FROM messages 
+            WHERE role = 'user' 
+            GROUP BY session_id 
+            HAVING MIN(timestamp)
+            ORDER BY timestamp DESC
+        """)
+        # Create a mapping of {session_id: "First 30 chars of prompt..."}
+        return {row[0]: (row[1][:30] + "..." if len(row[1]) > 30 else row[1]) for row in cursor.fetchall()}
 
 db = DatabaseManager()
 
@@ -77,12 +86,12 @@ db = DatabaseManager()
 class VectorManager:
     def __init__(self):
         self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        # STICKY RAG: Reduced chunk size to 500 characters
         self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 
     @st.cache_resource(show_spinner=False)
     def get_vector_store(_self, folder_path="documents"):
         if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
             return None
         
         texts = []
@@ -97,8 +106,7 @@ class VectorManager:
                 elif ext == ".txt":
                     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                         texts.append(f.read())
-            except Exception as e:
-                print(f"Error reading {filename}: {e}")
+            except: continue
         
         combined = "\n".join(filter(None, texts))
         if not combined.strip(): return None
@@ -107,27 +115,41 @@ class VectorManager:
 
 vm = VectorManager()
 
-# --- 4. SIDEBAR (Simplified: New Chat & History) ---
+# --- 4. SIDEBAR (New Chat & Title-based History) ---
 if "current_chat_id" not in st.session_state:
     st.session_state.current_chat_id = str(uuid.uuid4())
 
 with st.sidebar:
     st.title("💬 Chat Controls")
+    # NEW CHAT: Generates a new ID and forces a clear page
     if st.button("➕ Start New Chat", use_container_width=True):
         st.session_state.current_chat_id = str(uuid.uuid4())
         st.rerun()
     
     st.divider()
     st.subheader("Previous Conversations")
-    sessions = db.get_all_sessions()
-    if sessions:
-        selected = st.selectbox(
-            "Select a chat to view:", 
-            sessions, 
-            index=sessions.index(st.session_state.current_chat_id) if st.session_state.current_chat_id in sessions else 0
+    
+    # Map Session IDs to their first question text
+    session_map = db.get_session_titles()
+    
+    if session_map:
+        # We need the index of the current session in the list of keys for the selectbox
+        session_ids = list(session_map.keys())
+        # If the current session isn't in history yet (brand new chat), we add it temporarily
+        if st.session_state.current_chat_id not in session_ids:
+            session_ids.insert(0, st.session_state.current_chat_id)
+            session_map[st.session_state.current_chat_id] = "New Conversation"
+
+        # Display the selectbox using the human-readable titles
+        selected_id = st.selectbox(
+            "Select a chat:",
+            options=session_ids,
+            format_func=lambda x: session_map.get(x, "Unknown Chat"),
+            index=session_ids.index(st.session_state.current_chat_id)
         )
-        if selected != st.session_state.current_chat_id:
-            st.session_state.current_chat_id = selected
+        
+        if selected_id != st.session_state.current_chat_id:
+            st.session_state.current_chat_id = selected_id
             st.rerun()
     else:
         st.info("No chat history found.")
@@ -135,51 +157,46 @@ with st.sidebar:
 # --- 5. MAIN INTERFACE ---
 st.title("🤖 AI Research Assistant")
 
-# Display Messages from selected history
-for role, content in db.get_history(st.session_state.current_chat_id):
+# Display Messages
+chat_history = db.get_history(st.session_state.current_chat_id)
+for role, content in chat_history:
     with st.chat_message(role):
         st.markdown(content)
 
 # User Query
-user_input = st.chat_input("Ask a question about your local documents...")
+user_input = st.chat_input("Ask a question...")
 
 if user_input:
-    # 1. Save and Display User Input
+    # Save and Display User Input
     db.save_message(st.session_state.current_chat_id, "user", user_input)
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # 2. Generate AI Response
+    # Generate Response
     with st.chat_message("assistant"):
         placeholder = st.empty()
         
-        # SEARCH FOR CONTEXT (MANDATORY RAG)
-        with st.spinner("Retrieving relevant context..."):
+        with st.spinner("Analyzing documents..."):
             vector_db = vm.get_vector_store()
             context = ""
             if vector_db:
-                # Retrieve only top 3 small chunks (approx 1500 chars total)
                 docs = vector_db.similarity_search(user_input, k=3)
                 context = "\n\n".join([d.page_content for d in docs])
     
-        # Use Context to answer
-        prompt = f"Use this CONTEXT to answer the question briefly:\n{context}\n\nQUESTION: {user_input}"
+        prompt = f"CONTEXT:\n{context}\n\nQUESTION: {user_input}"
         
-        # API CALL WITH RETRY LOGIC
         success = False
         full_res = ""
-        for attempt in range(3):
+        for attempt in range(2):
             try:
-                # Using 3.1 Flash-Lite (the March 2026 standard for high-quota free tier)
+                # March 2026 High Quota Model
                 response = client.models.generate_content(
                     model="gemini-3.1-flash-lite-preview",
                     contents=prompt
                 )
-                
                 full_res = response.text
                 placeholder.markdown(full_res)
                 
-                # Save message with metadata
                 db.save_message(
                     st.session_state.current_chat_id, 
                     "assistant", 
@@ -189,14 +206,12 @@ if user_input:
                 )
                 success = True
                 break
-                
-            except errors.ClientError as ce:
-                if "429" in str(ce):
-                    placeholder.warning(f"Rate limit hit. Retrying in 30s... (Attempt {attempt+1}/3)")
+            except Exception as e:
+                if "429" in str(e):
                     time.sleep(30)
                 else:
-                    st.error(f"API Error: {ce}")
+                    st.error(f"Error: {e}")
                     break
 
         if success:
-            st.rerun() # Refresh to update chat display properly
+            st.rerun()
