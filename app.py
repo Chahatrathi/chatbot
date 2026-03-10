@@ -9,7 +9,7 @@ from google.genai import errors
 from pypdf import PdfReader
 from dotenv import load_dotenv
 
-# Modern LangChain imports
+# Modern LangChain imports for 2026
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -17,7 +17,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 load_dotenv()
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="AI Research Assistant", layout="wide", page_icon="🤖")
+st.set_page_config(page_title="AI Research Assistant", layout="centered", page_icon="🤖")
 
 def get_client():
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -67,102 +67,119 @@ class DatabaseManager:
         cursor = self.conn.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY timestamp ASC", (session_id,))
         return cursor.fetchall()
 
-    def get_total_usage(self):
-        cursor = self.conn.execute("SELECT SUM(prompt_tokens), SUM(completion_tokens), COUNT(id) FROM messages")
-        row = cursor.fetchone()
-        return (row[0] or 0, row[1] or 0, row[2] or 0)
+    def get_all_sessions(self):
+        cursor = self.conn.execute("SELECT DISTINCT session_id FROM messages ORDER BY timestamp DESC")
+        return [row[0] for row in cursor.fetchall()]
 
 db = DatabaseManager()
 
-# --- 3. VECTOR MANAGER (REDUCED CHUNKING) ---
+# --- 3. VECTOR MANAGER (Optimized RAG) ---
 class VectorManager:
     def __init__(self):
         self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        # REDUCED CHUNK SIZE to 500 for better token management
+        # STICKY RAG: Reduced chunk size to 500 characters
         self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 
-    def build_index(self, uploads):
+    @st.cache_resource(show_spinner=False)
+    def get_vector_store(_self, folder_path="documents"):
+        if not os.path.exists(folder_path):
+            return None
+        
         texts = []
-        if uploads:
-            for f in uploads:
-                ext = os.path.splitext(f.name)[-1].lower()
-                try:
-                    if ext == ".pdf":
-                        texts.append("\n".join([p.extract_text() for p in PdfReader(f).pages if p.extract_text()]))
-                    elif ext == ".docx":
-                        texts.append(docx2txt.process(f))
-                    elif ext == ".txt":
-                        texts.append(f.getvalue().decode("utf-8", errors="ignore"))
-                except Exception as e:
-                    st.warning(f"Error reading {f.name}: {e}")
+        for filename in os.listdir(folder_path):
+            file_path = os.path.join(folder_path, filename)
+            ext = os.path.splitext(filename)[-1].lower()
+            try:
+                if ext == ".pdf":
+                    texts.append("\n".join([p.extract_text() for p in PdfReader(file_path).pages if p.extract_text()]))
+                elif ext == ".docx":
+                    texts.append(docx2txt.process(file_path))
+                elif ext == ".txt":
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                        texts.append(f.read())
+            except Exception as e:
+                print(f"Error reading {filename}: {e}")
         
         combined = "\n".join(filter(None, texts))
         if not combined.strip(): return None
-        chunks = self.text_splitter.split_text(combined)
-        return FAISS.from_texts(chunks, self.embeddings)
+        chunks = _self.text_splitter.split_text(combined)
+        return FAISS.from_texts(chunks, _self.embeddings)
 
 vm = VectorManager()
 
-# --- 4. SIDEBAR DASHBOARD ---
+# --- 4. SIDEBAR (Simplified: New Chat & History) ---
 if "current_chat_id" not in st.session_state:
     st.session_state.current_chat_id = str(uuid.uuid4())
 
 with st.sidebar:
-    st.title("📊 Usage Dashboard")
-    p_sum, c_sum, msg_count = db.get_total_usage()
-    
-    col1, col2 = st.columns(2)
-    col1.metric("Input Tokens", f"{p_sum:,}")
-    col2.metric("Output Tokens", f"{c_sum:,}")
-    
-    daily_limit = 1000 # RPD for 2.5 Flash Lite
-    remaining = max(0, daily_limit - msg_count)
-    st.progress(remaining / daily_limit, text=f"Daily Quota: {remaining}/{daily_limit} left")
+    st.title("💬 Chat Controls")
+    if st.button("➕ Start New Chat", use_container_width=True):
+        st.session_state.current_chat_id = str(uuid.uuid4())
+        st.rerun()
     
     st.divider()
-    if st.button("➕ New Chat", use_container_width=True):
-        st.session_state.current_chat_id = str(uuid.uuid4()); st.rerun()
+    st.subheader("Previous Conversations")
+    sessions = db.get_all_sessions()
+    if sessions:
+        selected = st.selectbox(
+            "Select a chat to view:", 
+            sessions, 
+            index=sessions.index(st.session_state.current_chat_id) if st.session_state.current_chat_id in sessions else 0
+        )
+        if selected != st.session_state.current_chat_id:
+            st.session_state.current_chat_id = selected
+            st.rerun()
+    else:
+        st.info("No chat history found.")
 
-    uploads = st.file_uploader("Knowledge Base", type=["pdf", "txt", "docx"], accept_multiple_files=True)
-
-# --- 5. MAIN CHAT ---
+# --- 5. MAIN INTERFACE ---
 st.title("🤖 AI Research Assistant")
 
+# Display Messages from selected history
 for role, content in db.get_history(st.session_state.current_chat_id):
-    with st.chat_message(role): st.markdown(content)
+    with st.chat_message(role):
+        st.markdown(content)
 
-user_input = st.chat_input("Ask a question...")
+# User Query
+user_input = st.chat_input("Ask a question about your local documents...")
 
 if user_input:
+    # 1. Save and Display User Input
     db.save_message(st.session_state.current_chat_id, "user", user_input)
-    with st.chat_message("user"): st.markdown(user_input)
+    with st.chat_message("user"):
+        st.markdown(user_input)
 
+    # 2. Generate AI Response
     with st.chat_message("assistant"):
         placeholder = st.empty()
         
         # SEARCH FOR CONTEXT (MANDATORY RAG)
-        with st.spinner("Retrieving relevant facts..."):
-            vector_db = vm.build_index(uploads)
+        with st.spinner("Retrieving relevant context..."):
+            vector_db = vm.get_vector_store()
             context = ""
             if vector_db:
-                # Retrieve only top 3 small chunks
+                # Retrieve only top 3 small chunks (approx 1500 chars total)
                 docs = vector_db.similarity_search(user_input, k=3)
                 context = "\n\n".join([d.page_content for d in docs])
     
-        full_prompt = f"Use this CONTEXT to answer the question briefly:\n{context}\n\nQUESTION: {user_input}"
+        # Use Context to answer
+        prompt = f"Use this CONTEXT to answer the question briefly:\n{context}\n\nQUESTION: {user_input}"
         
         # API CALL WITH RETRY LOGIC
         success = False
+        full_res = ""
         for attempt in range(3):
             try:
+                # Using 3.1 Flash-Lite (the March 2026 standard for high-quota free tier)
                 response = client.models.generate_content(
-                    model="gemini-2.5-flash-lite",
-                    contents=full_prompt
+                    model="gemini-3.1-flash-lite-preview",
+                    contents=prompt
                 )
                 
                 full_res = response.text
                 placeholder.markdown(full_res)
                 
+                # Save message with metadata
                 db.save_message(
                     st.session_state.current_chat_id, 
                     "assistant", 
@@ -182,4 +199,4 @@ if user_input:
                     break
 
         if success:
-            st.rerun()
+            st.rerun() # Refresh to update chat display properly
