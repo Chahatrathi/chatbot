@@ -1,7 +1,6 @@
 import streamlit as st
 import os
 import sqlite3
-import time
 import uuid
 import docx
 from google import genai
@@ -54,6 +53,10 @@ class DatabaseManager:
         )
         return cursor.fetchall()
 
+    def get_all_sessions(self):
+        cursor = self.conn.execute("SELECT DISTINCT session_id FROM messages ORDER BY timestamp DESC")
+        return [row[0] for row in cursor.fetchall()]
+
 db = DatabaseManager()
 
 # --- 3. DATA EXTRACTION ---
@@ -81,19 +84,43 @@ def start_new_chat():
     st.session_state.current_chat_id = str(uuid.uuid4())
     st.rerun()
 
-# --- 5. SIDEBAR ---
+# --- 5. SIDEBAR (History & Files) ---
 with st.sidebar:
-    st.title("Research Settings")
+    st.title("Research Control")
     if st.button("➕ Start New Chat", use_container_width=True):
         start_new_chat()
     
     st.divider()
-    uploads = st.file_uploader("Knowledge Base", type=["pdf", "txt", "docx"], accept_multiple_files=True)
     
-    history_data = db.get_history(st.session_state.current_chat_id)
-    if history_data:
-        chat_text = "\n".join([f"{r.upper()}: {c}" for r, c in history_data])
-        st.download_button("📥 Download This Chat", data=chat_text, file_name=f"chat_{st.session_state.current_chat_id[:8]}.txt")
+    # Feature: List Old Sessions
+    st.subheader("Previous Chats")
+    sessions = db.get_all_sessions()
+    if sessions:
+        # User selects an old session to load it
+        selected_session = st.selectbox(
+            "Select a chat to view:",
+            sessions,
+            index=sessions.index(st.session_state.current_chat_id) if st.session_state.current_chat_id in sessions else 0
+        )
+        if selected_session != st.session_state.current_chat_id:
+            st.session_state.current_chat_id = selected_session
+            st.rerun()
+            
+        # Download Button for the selected session
+        history_data = db.get_history(st.session_state.current_chat_id)
+        if history_data:
+            chat_text = "\n".join([f"{r.upper()}: {c}" for r, c in history_data])
+            st.download_button(
+                label="📥 Download This Chat",
+                data=chat_text,
+                file_name=f"chat_{st.session_state.current_chat_id[:8]}.txt",
+                use_container_width=True
+            )
+    else:
+        st.info("No chat history found.")
+
+    st.divider()
+    uploads = st.file_uploader("Knowledge Base", type=["pdf", "txt", "docx"], accept_multiple_files=True)
 
 # --- 6. MAIN INTERFACE ---
 st.title("🤖 Assistant Research Chatbot")
@@ -103,11 +130,11 @@ for role, content in db.get_history(st.session_state.current_chat_id):
     with st.chat_message(role):
         st.markdown(content)
 
-# CHAT INPUT (Placed outside of any conditional loops to avoid Duplicate ID error)
+# CHAT INPUT
 user_input = st.chat_input("Ask a question...")
 
 if user_input:
-    # Save User Message
+    # Save and Display User Message
     db.save_message(st.session_state.current_chat_id, "user", user_input)
     with st.chat_message("user"):
         st.markdown(user_input)
@@ -126,12 +153,13 @@ if user_input:
             for f in uploads:
                 context += extract_text(f) + "\n"
 
-        # System Instructions for General Knowledge Fallback
+        # System Instruction: Fallback to General Knowledge
         prompt_template = (
-            "You are a helpful research assistant.\n"
-            "INSTRUCTION: Use the provided CONTEXT to answer. If the context is missing or irrelevant, "
-            "provide a high-quality answer using your general knowledge.\n\n"
-            f"CONTEXT:\n{context[:30000] if context else 'None provided.'}\n\n"
+            "You are a helpful research assistant. "
+            "Use the provided CONTEXT to answer the user's question. "
+            "If the CONTEXT is missing or does not contain the answer, answer the question using your general knowledge."
+            "\n\n"
+            f"CONTEXT:\n{context[:30000] if context else 'No document context provided.'}\n\n"
             f"QUESTION: {user_input}"
         )
 
