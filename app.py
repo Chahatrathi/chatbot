@@ -16,19 +16,19 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
 
-# --- 1. CONFIGURATION ---
+# --- 1. MY CONFIGURATION ---
 st.set_page_config(page_title="AI Research Assistant", layout="centered", page_icon="🤖")
 
 def get_client():
     api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        st.error("🔑 API Key missing! Add it to Streamlit Secrets.")
+        st.error("🔑 I need an API Key! Please add GOOGLE_API_KEY to Streamlit Secrets.")
         st.stop()
     return genai.Client(api_key=api_key, vertexai=False)
 
 client = get_client()
 
-# --- 2. DATABASE MANAGER (Updated for Titles) ---
+# --- 2. HOW I MANAGE YOUR DATABASE ---
 class DatabaseManager:
     def __init__(self, db_path="chat_history.db"):
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -68,7 +68,7 @@ class DatabaseManager:
         return cursor.fetchall()
 
     def get_session_titles(self):
-        """Fetches unique session IDs and the first user message as the title."""
+        """I fetch your first question to use as a readable title in the sidebar."""
         cursor = self.conn.execute("""
             SELECT session_id, content 
             FROM messages 
@@ -77,12 +77,11 @@ class DatabaseManager:
             HAVING MIN(timestamp)
             ORDER BY timestamp DESC
         """)
-        # Create a mapping of {session_id: "First 30 chars of prompt..."}
         return {row[0]: (row[1][:30] + "..." if len(row[1]) > 30 else row[1]) for row in cursor.fetchall()}
 
 db = DatabaseManager()
 
-# --- 3. VECTOR MANAGER (Optimized RAG) ---
+# --- 3. HOW I PROCESS YOUR DOCUMENTS (RAG) ---
 class VectorManager:
     def __init__(self):
         self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
@@ -115,34 +114,31 @@ class VectorManager:
 
 vm = VectorManager()
 
-# --- 4. SIDEBAR (New Chat & Title-based History) ---
+# --- 4. MY SIDEBAR LOGIC ---
 if "current_chat_id" not in st.session_state:
     st.session_state.current_chat_id = str(uuid.uuid4())
 
 with st.sidebar:
     st.title("💬 Chat Controls")
-    # NEW CHAT: Generates a new ID and forces a clear page
+    # When you click this, I start a brand new session
     if st.button("➕ Start New Chat", use_container_width=True):
         st.session_state.current_chat_id = str(uuid.uuid4())
         st.rerun()
     
     st.divider()
-    st.subheader("Previous Conversations")
+    st.subheader("Your History")
     
-    # Map Session IDs to their first question text
     session_map = db.get_session_titles()
     
     if session_map:
-        # We need the index of the current session in the list of keys for the selectbox
         session_ids = list(session_map.keys())
-        # If the current session isn't in history yet (brand new chat), we add it temporarily
+        # If this is a new chat you haven't started yet, I label it accordingly
         if st.session_state.current_chat_id not in session_ids:
             session_ids.insert(0, st.session_state.current_chat_id)
             session_map[st.session_state.current_chat_id] = "New Conversation"
 
-        # Display the selectbox using the human-readable titles
         selected_id = st.selectbox(
-            "Select a chat:",
+            "Pick a conversation:",
             options=session_ids,
             format_func=lambda x: session_map.get(x, "Unknown Chat"),
             index=session_ids.index(st.session_state.current_chat_id)
@@ -152,34 +148,35 @@ with st.sidebar:
             st.session_state.current_chat_id = selected_id
             st.rerun()
     else:
-        st.info("No chat history found.")
+        st.info("I couldn't find any past chats.")
 
-# --- 5. MAIN INTERFACE ---
-st.title("🤖 AI Research Assistant")
+# --- 5. OUR CONVERSATION INTERFACE ---
+st.title("🤖 Your Research Assistant")
 
-# Display Messages
+# I load our previous messages here
 chat_history = db.get_history(st.session_state.current_chat_id)
 for role, content in chat_history:
     with st.chat_message(role):
         st.markdown(content)
 
-# User Query
-user_input = st.chat_input("Ask a question...")
+# I wait for your input here
+user_input = st.chat_input("Ask me anything...")
 
 if user_input:
-    # Save and Display User Input
+    # I save and display your message first
     db.save_message(st.session_state.current_chat_id, "user", user_input)
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Generate Response
+    # Now I generate my response
     with st.chat_message("assistant"):
         placeholder = st.empty()
         
-        with st.spinner("Analyzing documents..."):
+        with st.spinner("I'm looking through your documents..."):
             vector_db = vm.get_vector_store()
             context = ""
             if vector_db:
+                # I only pick the most relevant snippets to save your tokens
                 docs = vector_db.similarity_search(user_input, k=3)
                 context = "\n\n".join([d.page_content for d in docs])
     
@@ -187,9 +184,9 @@ if user_input:
         
         success = False
         full_res = ""
+        # I will try to reach the API, with a backup plan if it's busy
         for attempt in range(2):
             try:
-                # March 2026 High Quota Model
                 response = client.models.generate_content(
                     model="gemini-3.1-flash-lite-preview",
                     contents=prompt
@@ -197,6 +194,7 @@ if user_input:
                 full_res = response.text
                 placeholder.markdown(full_res)
                 
+                # I save my response and track how many tokens I used
                 db.save_message(
                     st.session_state.current_chat_id, 
                     "assistant", 
@@ -210,7 +208,7 @@ if user_input:
                 if "429" in str(e):
                     time.sleep(30)
                 else:
-                    st.error(f"Error: {e}")
+                    st.error(f"I ran into an error: {e}")
                     break
 
         if success:
